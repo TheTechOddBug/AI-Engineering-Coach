@@ -231,14 +231,13 @@ describe('Analyzer', () => {
           requests: [makeRequest({ timestamp: ts }), makeRequest({ timestamp: ts + 1000 })] }),
         makeSession({ sessionId: 's2', harness: 'GitHub Copilot CLI', creationDate: ts, workspaceName: 'proj',
           requests: [makeRequest({ timestamp: ts })] }),
-        // Non-GHCP harness — getConsumption excludes this from premium-request counts.
         makeSession({ sessionId: 's3', harness: 'Codex', creationDate: ts, workspaceName: 'proj',
           requests: [makeRequest({ timestamp: ts })] }),
       ];
       const a = new Analyzer(sessions);
-      // getConsumption only counts GHCP-billable harnesses (Codex excluded).
+      // getConsumption now counts all harnesses.
       const all = a.getConsumption();
-      expect(all.totalRequests).toBe(3);
+      expect(all.totalRequests).toBe(4);
 
       const filtered = a.getConsumption({ harness: 'Local Agent' });
       expect(filtered.totalRequests).toBe(2);
@@ -393,15 +392,15 @@ describe('Analyzer', () => {
 
     it('harness filter propagates to getConsumption', () => {
       const a = new Analyzer(sessions);
-      // Filter by Local Agent (a GHCP-billable harness) — s1 has 2 requests, s3 has 3.
+      // Filter by Local Agent — s1 has 2 requests, s3 has 3.
       const filter = validateDateFilter({ harness: 'Local Agent' } as Record<string, unknown>);
       const cons = a.getConsumption(filter);
       expect(cons.totalRequests).toBe(5); // s1(2) + s3(3)
 
-      // Filter by Claude (non-GHCP) — getConsumption excludes it from premium-request counts.
+      // Filter by Claude — only Claude sessions are included.
       const claudeFilter = validateDateFilter({ harness: 'Claude' } as Record<string, unknown>);
       const claudeCons = a.getConsumption(claudeFilter);
-      expect(claudeCons.totalRequests).toBe(0);
+      expect(claudeCons.totalRequests).toBe(1);
     });
 
     it('harness filter propagates to getWorkspaceBreakdown', () => {

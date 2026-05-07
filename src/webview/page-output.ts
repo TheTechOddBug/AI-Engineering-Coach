@@ -8,7 +8,7 @@
 import { DateFilter } from '../core/types';
 import { TOKEN_DATA_AVAILABLE_FROM } from '../core/constants';
 import { isoWeek } from '../core/helpers';
-import { rpc, createChart, formatNum, formatMoney, $$, PALETTE, COLORS, HARNESS_COLORS } from './shared';
+import { rpc, createChart, formatNum, $$, PALETTE, COLORS, HARNESS_COLORS } from './shared';
 import { html, render, StatCard, CanvasEl, ComponentChildren } from './render';
 
 type AggLevel = 'daily' | 'weekly' | 'monthly';
@@ -63,16 +63,8 @@ interface ProdData {
   byLanguage: { labels: string[]; aiLoc: number[] };
   byWorkspace: { labels: string[]; aiLoc: number[] };
   dailyByWorkspace: Record<string, number[]>;
-}
-
-interface ConsData {
-  totalRequests: number;
-  avgPerDay: number;
-  avgPerWeek: number;
-  modelTotals: Record<string, number>;
-  defaultMultipliers: Record<string, number>;
-  daily: { labels: string[]; values: number[]; byModel: Record<string, number[]> };
-  weekly: { labels: string[]; values: number[]; byModel: Record<string, number[]> };
+  dailyByModel: Record<string, number[]>;
+  dailyByHarness: Record<string, number[]>;
 }
 
 interface AiCreditRpcData {
@@ -102,6 +94,7 @@ interface AiCreditRpcData {
   daily: { labels: string[]; credits: number[]; cumulative: number[]; byModel: Record<string, number[]> };
   weekly: { labels: string[]; credits: number[]; cumulative: number[]; byModel: Record<string, number[]> };
   dailyTokensByWorkspace: { labels: string[]; byWorkspace: Record<string, number[]> };
+  dailyTokensByHarness: { labels: string[]; byHarness: Record<string, number[]> };
   topRequests: Array<{
     timestamp: number; model: string;
     inputTokens: number; outputTokens: number;
@@ -117,35 +110,25 @@ interface AiCreditRpcData {
 
 // Module-level view state — survives filter/harness changes so the user's
 // tab and range selection is preserved when only the backing data changes.
-type OutputTab = 'production' | 'consumption' | 'ai-credits';
+type OutputTab = 'production' | 'token-usage';
 let activeRangeDays = 0;
 let activeTab: OutputTab = 'production';
 
 export async function renderOutput(container: HTMLElement, currentFilter: DateFilter): Promise<void> {
 
-  // Tabs whose answers depend on token data quality (and so honor the
-  // TOKEN_DATA_AVAILABLE_FROM cutoff). Other tabs are based on request
-  // counts / LOC and can safely look at all history.
-  const TOKEN_DATA_TABS = new Set<OutputTab>(['ai-credits']);
-
-  // Disclaimer banner shown above the AI Credit Usage and Premium Request
-  // Consumption tabs. Both views are computed from local session files only,
-  // so they cannot see activity from other devices, cloud-hosted agents, or
-  // harnesses we don't read. The link points users at the authoritative
-  // source for billing.
+  // Disclaimer banner shown above the Token Usage tab.
+  // Computed from local session files only, so cannot see activity from
+  // other devices, cloud-hosted agents, or harnesses we don't read.
   const APPROXIMATION_NOTICE = html`
     <div class="approximation-notice">
       <strong>Approximation only.</strong>${' '}
-      AI Credit Usage and Premium Request Consumption are estimated from the
-      session data this extension can read on your machine. They cannot reflect
-      activity on other devices, cloud-hosted agents, or harnesses this
-      extension doesn't ingest, so they will never be fully accurate.
-      Use them as a workflow optimization signal, not as a billing reference.
-      For authoritative consumption numbers, see your${' '}
-      <a href="https://github.com/settings/copilot/features" target="_blank" rel="noopener">GitHub Copilot usage settings</a>.
+      Token usage is estimated from the session data this extension can read
+      on your machine. It shows token consumption across all harnesses and
+      may not be fully accurate — it cannot reflect activity on other devices,
+      cloud-hosted agents, or harnesses this extension doesn't ingest.
+      Use it as a workflow optimization signal, not as a billing reference.
     </div>
   `;
-  const isTokenDataTab = (tab: OutputTab) => TOKEN_DATA_TABS.has(tab);
 
   // Range options shown in the bar. Order matters: longest range last so
   // "All time" (0) lives on the right. The 7/28-day buttons are short enough
@@ -167,7 +150,7 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
   }
 
   function isRangeDisabled(tab: OutputTab, days: number): boolean {
-    if (!isTokenDataTab(tab)) return false;
+    if (tab !== 'token-usage') return false;
     return rangeStartDate(days) < TOKEN_DATA_AVAILABLE_FROM;
   }
 
@@ -177,7 +160,8 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
     if (days > 0) {
       f.fromDate = rangeStartDate(days);
     }
-    if (isTokenDataTab(activeTab)) {
+    // Only clamp to TOKEN_DATA_AVAILABLE_FROM on the token-usage tab
+    if (activeTab === 'token-usage') {
       const fromDate = (f.fromDate as string | undefined) ?? '';
       if (!fromDate || fromDate < TOKEN_DATA_AVAILABLE_FROM) {
         f.fromDate = TOKEN_DATA_AVAILABLE_FROM;
@@ -189,26 +173,21 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
   function creditChartTitle(): string {
     const rangeLabel = RANGES.find(r => r.days === activeRangeDays)?.label ?? 'All time';
     const granularity = activeRangeDays > 0 && activeRangeDays <= 28 ? 'Daily' : 'Weekly';
-    return `${granularity} AI Credit Consumption \u2014 ${rangeLabel}`;
+    return `${granularity} Token Consumption — ${rangeLabel}`;
   }
 
   function tokenByWsChartTitle(): string {
     const rangeLabel = RANGES.find(r => r.days === activeRangeDays)?.label ?? 'All time';
     const level = aggregationLevel(activeRangeDays);
     const granularity = level === 'daily' ? 'Daily' : level === 'weekly' ? 'Weekly' : 'Monthly';
-    return `${granularity} Token Consumption by Workspace \u2014 ${rangeLabel}`;
+    return `${granularity} Token Consumption by Workspace — ${rangeLabel}`;
   }
 
-  function consChartTitle(): string {
+  function tokenByHarnessChartTitle(): string {
     const rangeLabel = RANGES.find(r => r.days === activeRangeDays)?.label ?? 'All time';
-    const granularity = activeRangeDays > 0 && activeRangeDays <= 28 ? 'Daily' : 'Weekly';
-    return `${granularity} Premium Request Consumption \u2014 ${rangeLabel}`;
-  }
-
-  function overlayChartTitle(): string {
-    const rangeLabel = RANGES.find(r => r.days === activeRangeDays)?.label ?? 'All time';
-    const granularity = activeRangeDays > 0 && activeRangeDays <= 28 ? 'Daily' : 'Weekly';
-    return `${granularity} AI Credits vs Premium Requests \u2014 ${rangeLabel}`;
+    const level = aggregationLevel(activeRangeDays);
+    const granularity = level === 'daily' ? 'Daily' : level === 'weekly' ? 'Weekly' : 'Monthly';
+    return `${granularity} Token Consumption by Harness — ${rangeLabel}`;
   }
 
   function renderRangeBar(): ComponentChildren {
@@ -253,8 +232,7 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
     <div class="cons-range-bar" id="outputRange"></div>
     <div class="tab-bar" id="output-tabs">
       <button class=${`tab${activeTab === 'production' ? ' active' : ''}`} data-tab="production">Code Output</button>
-      <button class=${`tab${activeTab === 'consumption' ? ' active' : ''}`} data-tab="consumption">Premium Request Consumption</button>
-      <button class=${`tab${activeTab === 'ai-credits' ? ' active' : ''}`} data-tab="ai-credits">AI Credit Usage</button>
+      <button class=${`tab${activeTab === 'token-usage' ? ' active' : ''}`} data-tab="token-usage">Token Usage</button>
     </div>
     <div id="output-tab-content"></div>
   `, container);
@@ -272,30 +250,72 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
     const s = prod.summary;
     const level = aggregationLevel(activeRangeDays);
     const chartTitle = level === 'weekly' ? 'Weekly Production' : level === 'monthly' ? 'Monthly Production' : 'Daily Production';
+    const yLabel = level === 'weekly' ? 'LoC/week' : level === 'monthly' ? 'LoC/month' : 'LoC/day';
 
     render(html`
       <div class="stat-grid">
         <${StatCard} label="AI-Generated LoC" value=${formatNum(s.totalAiLoc)} accent="var(--accent-blue)" />
-        <${StatCard} label="Est. 2010s Value" value=${formatMoney(s.locCost2010)} accent="var(--accent-purple)" />
       </div>
-      <${CanvasEl} id="prodDailyChart" height=${250} title=${chartTitle} />
+      <div class="chart-tabs" style="margin-top:18px">
+        <button class="chart-tab active" data-prod-tab="model">Code Output</button>
+        <button class="chart-tab" data-prod-tab="workspace">Output by Workspace</button>
+        <button class="chart-tab" data-prod-tab="harness">Output by Harness</button>
+      </div>
+      <div id="prodTabModel" class="chart-tab-panel active"><${CanvasEl} id="prodModelChart" height=${300} title=${chartTitle} /></div>
+      <div id="prodTabWorkspace" class="chart-tab-panel"><${CanvasEl} id="prodDailyChart" height=${300} title=${chartTitle} /></div>
+      <div id="prodTabHarness" class="chart-tab-panel"><${CanvasEl} id="prodHarnessChart" height=${300} title=${chartTitle} /></div>
       <div class="two-col">
         <${CanvasEl} id="prodLangChart" height=${300} title="By Language" />
         <${CanvasEl} id="prodWsChart" height=${300} title="By Workspace" />
       </div>
     `, target);
 
-    const wsNames = prod.byWorkspace.labels;
     const wsColor = (i: number) => PALETTE[i % PALETTE.length];
 
+    // --- By Model chart (default) ---
+    const { labels: modelLabels, byWs: modelBuckets } = aggregateByWorkspace(
+      prod.dailyTimeline.labels, prod.dailyByModel, level,
+    );
+    const modelNames = Object.keys(modelBuckets).sort((a, b) => {
+      const sumA = modelBuckets[a].reduce((sum, v) => sum + v, 0);
+      const sumB = modelBuckets[b].reduce((sum, v) => sum + v, 0);
+      return sumB - sumA;
+    });
+    const topModels = modelNames.slice(0, 8);
+    const otherModels = modelNames.slice(8);
+    const otherModelData = modelLabels.map((_, i) => otherModels.reduce((sum, m) => sum + (modelBuckets[m]?.[i] ?? 0), 0));
+    const modelDatasets: Record<string, unknown>[] = topModels.map((m, i) => ({
+      label: m, data: modelBuckets[m], backgroundColor: PALETTE[i % PALETTE.length] + '99',
+      borderColor: PALETTE[i % PALETTE.length], borderWidth: 1, stack: 'models',
+    }));
+    if (otherModels.length > 0) {
+      modelDatasets.push({ label: `Other (${otherModels.length})`, data: otherModelData, backgroundColor: COLORS.muted + '60', borderColor: COLORS.muted, borderWidth: 1, stack: 'models' });
+    }
+    if (modelDatasets.length === 0) {
+      const { values: aggTotals } = aggregateTimeline(prod.dailyTimeline.labels, prod.dailyTimeline.aiLoc, level);
+      modelDatasets.push({ label: 'AI LoC', data: aggTotals, backgroundColor: PALETTE[0] + '99', borderColor: PALETTE[0], borderWidth: 1, stack: 'models' });
+    }
+    createChart('prodModelChart', 'bar', { labels: modelLabels, datasets: modelDatasets }, {
+      plugins: { legend: { position: 'top' } },
+      scales: { x: { stacked: true, ticks: { maxTicksLimit: 15 } }, y: { stacked: true, beginAtZero: true, title: { display: true, text: yLabel } } },
+    });
+
+    // --- By Workspace chart ---
     const { labels: aggLabels, byWs: aggByWs } = aggregateByWorkspace(
       prod.dailyTimeline.labels, prod.dailyByWorkspace, level,
     );
     const { values: aggTotals } = aggregateTimeline(
       prod.dailyTimeline.labels, prod.dailyTimeline.aiLoc, level,
     );
-
-    const dailyDatasets = wsNames
+    const allWsNames = Object.keys(aggByWs).sort((a, b) => {
+      const sumA = aggByWs[a].reduce((s, v) => s + v, 0);
+      const sumB = aggByWs[b].reduce((s, v) => s + v, 0);
+      return sumB - sumA;
+    });
+    const topWsNames = allWsNames.slice(0, 15);
+    const otherWsNames = allWsNames.slice(15);
+    const otherWsData = aggLabels.map((_, i) => otherWsNames.reduce((sum, ws) => sum + (aggByWs[ws]?.[i] ?? 0), 0));
+    const dailyDatasets = topWsNames
       .filter(ws => aggByWs[ws])
       .map((ws, i) => ({
         label: ws,
@@ -304,6 +324,15 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
         borderColor: wsColor(i),
         borderWidth: 1,
       }));
+    if (otherWsNames.length > 0) {
+      dailyDatasets.push({
+        label: `Other (${otherWsNames.length})`,
+        data: otherWsData,
+        backgroundColor: COLORS.muted + '60',
+        borderColor: COLORS.muted,
+        borderWidth: 1,
+      });
+    }
     if (dailyDatasets.length === 0) {
       dailyDatasets.push({
         label: 'AI LoC',
@@ -313,15 +342,36 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
         borderWidth: 1,
       });
     }
-
     createChart('prodDailyChart', 'bar', {
       labels: aggLabels,
       datasets: dailyDatasets,
     }, {
       plugins: { legend: { display: dailyDatasets.length > 1, position: 'bottom', labels: { boxWidth: 12, padding: 8 } } },
-      scales: { x: { stacked: true, ticks: { maxTicksLimit: 15 } }, y: { stacked: true, beginAtZero: true } },
+      scales: { x: { stacked: true, ticks: { maxTicksLimit: 15 } }, y: { stacked: true, beginAtZero: true, title: { display: true, text: yLabel } } },
     });
 
+    // --- By Harness chart ---
+    const { labels: hLabels, byWs: hBuckets } = aggregateByWorkspace(
+      prod.dailyTimeline.labels, prod.dailyByHarness, level,
+    );
+    const hNames = Object.keys(hBuckets).sort((a, b) => {
+      const sumA = hBuckets[a].reduce((sum, v) => sum + v, 0);
+      const sumB = hBuckets[b].reduce((sum, v) => sum + v, 0);
+      return sumB - sumA;
+    });
+    const hDatasets: Record<string, unknown>[] = hNames.map((h) => ({
+      label: h, data: hBuckets[h],
+      backgroundColor: (harnessColor(h)) + '99',
+      borderColor: harnessColor(h), borderWidth: 1, stack: 'harness',
+    }));
+    if (hDatasets.length > 0) {
+      createChart('prodHarnessChart', 'bar', { labels: hLabels, datasets: hDatasets }, {
+        plugins: { legend: { position: 'top' } },
+        scales: { x: { stacked: true, ticks: { maxTicksLimit: 15 } }, y: { stacked: true, beginAtZero: true, title: { display: true, text: yLabel } } },
+      });
+    }
+
+    // --- Sidebar charts ---
     createChart('prodLangChart', 'bar', {
       labels: prod.byLanguage.labels,
       datasets: [{ label: 'AI LoC', data: prod.byLanguage.aiLoc, backgroundColor: PALETTE[0] }],
@@ -331,7 +381,7 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
       scales: { x: { beginAtZero: true } },
     });
 
-    const wsBarColors = wsNames.map((_, i) => wsColor(i));
+    const wsBarColors = prod.byWorkspace.labels.map((_, i) => wsColor(i));
     createChart('prodWsChart', 'bar', {
       labels: prod.byWorkspace.labels,
       datasets: [{ label: 'AI LoC', data: prod.byWorkspace.aiLoc, backgroundColor: wsBarColors }],
@@ -340,110 +390,30 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
       plugins: { legend: { display: false } },
       scales: { x: { beginAtZero: true } },
     });
-  }
 
-  async function renderConsumptionTab(): Promise<void> {
-    const target = document.getElementById('output-tab-content')!;
-    render(html`<div class="loading-spinner"></div>`, target);
-
-    const cons = await rpc<ConsData>('getConsumption', buildRangeFilter());
-
-    render(html`
-      ${APPROXIMATION_NOTICE}
-      <div class="stat-grid" id="consStats">
-        <${StatCard} label="Total Requests" value=${formatNum(cons.totalRequests)} accent="var(--accent-blue)" />
-        <${StatCard} label="Avg/Day" value=${formatNum(Math.round(cons.avgPerDay))} accent="var(--accent-green)" />
-        <${StatCard} label="Avg/Week" value=${formatNum(Math.round(cons.avgPerWeek))} accent="var(--accent-purple)" />
-      </div>
-      <${CanvasEl} id="consChart" height=${300} title=${consChartTitle()} />
-      <h2>Model Breakdown</h2>
-      <div id="modelTable"></div>
-    `, target);
-
-    const useDaily = activeRangeDays > 0 && activeRangeDays <= 28;
-    const series = useDaily ? cons.daily : cons.weekly;
-    const cumulative = series.values.reduce((acc: number[], v: number) => {
-      acc.push((acc.length > 0 ? acc[acc.length - 1] : 0) + v);
-      return acc;
-    }, []);
-
-    const modelColors = PALETTE;
-    const byModel = series.byModel;
-    const modelNames = Object.keys(byModel).sort((a, b) => {
-      const sumA = byModel[a].reduce((s: number, v: number) => s + v, 0);
-      const sumB = byModel[b].reduce((s: number, v: number) => s + v, 0);
-      return sumB - sumA;
-    });
-
-    const TOP_N = 8;
-    const topModels = modelNames.slice(0, TOP_N);
-    const otherModels = modelNames.slice(TOP_N);
-
-    const otherData = series.labels.map((_: string, i: number) =>
-      otherModels.reduce((sum: number, m: string) => sum + (byModel[m]?.[i] ?? 0), 0)
-    );
-
-    const modelDatasets: Record<string, unknown>[] = topModels.map((model, i) => ({
-      label: model,
-      data: byModel[model],
-      backgroundColor: modelColors[i % modelColors.length] + '99',
-      borderColor: modelColors[i % modelColors.length],
-      borderWidth: 1,
-      order: 2,
-      stack: 'models',
-    }));
-
-    if (otherModels.length > 0) {
-      modelDatasets.push({
-        label: `Other (${otherModels.length})`,
-        data: otherData,
-        backgroundColor: COLORS.muted + '60',
-        borderColor: COLORS.muted,
-        borderWidth: 1,
-        order: 2,
-        stack: 'models',
+    // Wire production chart tab switching
+    for (const btn of target.querySelectorAll<HTMLButtonElement>('.chart-tab[data-prod-tab]')) {
+      btn.addEventListener('click', () => {
+        for (const b of target.querySelectorAll<HTMLButtonElement>('.chart-tab[data-prod-tab]')) b.classList.remove('active');
+        btn.classList.add('active');
+        const tab = btn.dataset.prodTab;
+        const panelMap: Record<string, string> = { model: 'prodTabModel', workspace: 'prodTabWorkspace', harness: 'prodTabHarness' };
+        for (const p of target.querySelectorAll<HTMLElement>('.chart-tab-panel')) p.classList.remove('active');
+        document.getElementById(panelMap[tab || 'model'])!.classList.add('active');
       });
     }
-
-    const yLabel = useDaily ? 'Requests/day' : 'Requests/week';
-
-    createChart('consChart', 'bar', {
-      labels: series.labels,
-      datasets: [
-        ...modelDatasets as { label: string; data: number[]; backgroundColor: string; borderColor: string; borderWidth: number; order: number; stack: string }[],
-        { label: 'Cumulative', data: cumulative, type: 'line' as const, borderColor: COLORS.yellow, backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, order: 1, yAxisID: 'y1' },
-      ],
-    }, {
-      plugins: { legend: { position: 'top' } },
-      scales: {
-        x: { stacked: true, ticks: { maxTicksLimit: 15 } },
-        y: { stacked: true, beginAtZero: true, position: 'left', title: { display: true, text: yLabel } },
-        y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Cumulative' } },
-      },
-    });
-
-    const models = Object.entries(cons.modelTotals).sort((a, b) => b[1] - a[1]);
-    const totalReqs = cons.totalRequests || 1;
-    const modelTableEl = document.getElementById('modelTable')!;
-    render(html`<table class="data-table"><thead><tr><th>Model</th><th>Requests</th><th>Share</th><th>Multiplier</th><th>Premium Reqs</th></tr></thead><tbody>
-      ${models.map(([model, count]) => {
-        const mult = cons.defaultMultipliers[model] ?? 1;
-        const premium = Math.round(count * mult);
-        return html`<tr><td>${model}</td><td>${formatNum(count)}</td><td>${((count / totalReqs) * 100).toFixed(1)}%</td><td>${mult}x</td><td>${formatNum(premium)}</td></tr>`;
-      })}
-    </tbody></table>`, modelTableEl);
   }
 
   function buildCreditCoverageSummary(data: AiCreditRpcData): { missingLabel: ComponentChildren; partialLabel: ComponentChildren; pendingLabel: ComponentChildren; noDataLabel: ComponentChildren } {
     const trulyMissing = data.finalizableRequests - data.countedRequests - data.partialRequests;
     return {
       missingLabel: data.finalizableRequests > 0 && data.missingPct > 0
-        ? html`<span class="missing-badge badge-popup-trigger" tabindex="0">missing ${data.missingPct}%<span class="badge-popup"><strong>Missing (${data.missingPct}%)</strong><br/>${formatNum(trulyMissing)} of ${formatNum(data.finalizableRequests)} finalizable requests have no token data (neither input nor output tokens recorded). These requests could not be billed and are excluded from credit totals.</span></span>`
+        ? html`<span class="missing-badge badge-popup-trigger" tabindex="0">missing ${data.missingPct}%<span class="badge-popup"><strong>Missing (${data.missingPct}%)</strong><br/>${formatNum(trulyMissing)} of ${formatNum(data.finalizableRequests)} finalizable requests have no token data (neither input nor output tokens recorded). These requests are excluded from totals.</span></span>`
         : data.finalizableRequests === 0 && data.totalRequests > 0
-          ? html`<span class="missing-badge badge-popup-trigger" tabindex="0">no finalizable requests<span class="badge-popup"><strong>No finalizable requests</strong><br/>All requests in this period are either still pending (active/aborted sessions) or from sources that don\u2019t record token usage. No credit totals can be computed yet.</span></span>`
+          ? html`<span class="missing-badge badge-popup-trigger" tabindex="0">no finalizable requests<span class="badge-popup"><strong>No finalizable requests</strong><br/>All requests in this period are either still pending (active/aborted sessions) or from sources that don\u2019t record token usage. No token totals can be computed yet.</span></span>`
           : '',
       partialLabel: data.partialRequests > 0
-        ? html` <span class="pending-badge badge-popup-trigger" tabindex="0">+${formatNum(data.partialRequests)} partial<span class="badge-popup"><strong>Partial (${formatNum(data.partialRequests)} requests)</strong><br/>These requests captured output tokens but not input tokens \u2014 credits cannot be billed exactly. The output token cost is still included in totals, but input cost is unknown. This is common with VS Code Copilot auto-completions and inline suggestions.</span></span>`
+        ? html` <span class="pending-badge badge-popup-trigger" tabindex="0">+${formatNum(data.partialRequests)} partial<span class="badge-popup"><strong>Partial (${formatNum(data.partialRequests)} requests)</strong><br/>These requests captured output tokens but not input tokens \u2014 cost cannot be estimated exactly. The output token cost is still included in totals, but input cost is unknown. This is common with VS Code Copilot auto-completions and inline suggestions.</span></span>`
         : '',
       pendingLabel: data.pendingRequests > 0
         ? html` <span class="pending-badge badge-popup-trigger" tabindex="0">+${formatNum(data.pendingRequests)} pending<span class="badge-popup"><strong>Pending (${formatNum(data.pendingRequests)} requests)</strong><br/>Requests in active or aborted sessions where token data was never finalized. These are excluded from the missing % calculation because they may still receive data when sessions close. Common with long-running or interrupted agentic sessions.</span></span>`
@@ -464,10 +434,14 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
     const body = data.pendingRequests > 0
       ? `All ${formatNum(data.totalRequests)} request${data.totalRequests === 1 ? '' : 's'} in this period are still pending or were aborted before any model output. Token data may yet arrive once sessions finalize.`
       : data.noDataRequests === data.totalRequests
-        ? `All ${formatNum(data.totalRequests)} request${data.totalRequests === 1 ? '' : 's'} are from sources that don't record token usage (e.g. Xcode), so AI Credit usage cannot be computed.`
-        : `None of the ${formatNum(data.totalRequests)} request${data.totalRequests === 1 ? '' : 's'} in this period have both input and output token counts reported by the harness, so AI Credit usage cannot be computed.`;
+        ? `All ${formatNum(data.totalRequests)} request${data.totalRequests === 1 ? '' : 's'} are from sources that don't record token usage (e.g. Xcode), so token usage cannot be computed.`
+        : `None of the ${formatNum(data.totalRequests)} request${data.totalRequests === 1 ? '' : 's'} in this period have both input and output token counts reported by the harness, so token usage cannot be computed.`;
     render(html`${APPROXIMATION_NOTICE}<div class="empty-state"><h2>${heading}</h2><p>${body}</p></div>`, target);
     return true;
+  }
+
+  function harnessColor(h: string): string {
+    return HARNESS_COLORS[h] || '#6b7280';
   }
 
   function renderAiCreditsCharts(data: AiCreditRpcData): { modelEntries: [string, AiCreditRpcData['costByModel'][string]][] } {
@@ -484,20 +458,15 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
       }],
     }, { plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx: { label: string; raw: number }) => `${ctx.label}: ${formatNum(ctx.raw)}` } } }, scales: { y: { beginAtZero: true, ticks: { callback: (v: number) => formatNum(v) } } } });
 
-    const modelEntries = Object.entries(data.costByModel).sort((a, b) => b[1].credits - a[1].credits);
-    const topN = modelEntries.slice(0, 10);
-    createChart('creditModelBar', 'bar', {
-      labels: topN.map(([m]) => m),
-      datasets: [{ label: 'AI Credits', data: topN.map(([, v]) => Math.round(v.credits * 100) / 100), backgroundColor: topN.map((_, i) => PALETTE[i % PALETTE.length]) }],
-    }, { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true } } });
+    const modelEntries = Object.entries(data.costByModel).sort((a, b) => (b[1].inputTokens + b[1].outputTokens) - (a[1].inputTokens + a[1].outputTokens));
 
     const useDaily = activeRangeDays > 0 && activeRangeDays <= 28;
     const series = useDaily ? data.daily : data.weekly;
-    const yLabel = useDaily ? 'Credits/day' : 'Credits/week';
+    const yLabel = useDaily ? 'Tokens/day' : 'Tokens/week';
     const byModel = series.byModel;
     const modelNames = Object.keys(byModel).sort((a, b) => byModel[b].reduce((s: number, v: number) => s + v, 0) - byModel[a].reduce((s: number, v: number) => s + v, 0));
-    const topCreditModels = modelNames.slice(0, 8);
-    const otherCreditModels = modelNames.slice(8);
+    const topCreditModels = modelNames.slice(0, 12);
+    const otherCreditModels = modelNames.slice(12);
     const otherCreditData = series.labels.map((_: string, i: number) => otherCreditModels.reduce((sum: number, m: string) => sum + (byModel[m]?.[i] ?? 0), 0));
     const creditDatasets: Record<string, unknown>[] = topCreditModels.map((model, i) => ({ label: model, data: byModel[model], backgroundColor: PALETTE[i % PALETTE.length] + '99', borderColor: PALETTE[i % PALETTE.length], borderWidth: 1, order: 2, stack: 'models' }));
     if (otherCreditModels.length > 0) {
@@ -521,8 +490,8 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
       const sumB = wsBuckets[b].reduce((s, v) => s + v, 0);
       return sumB - sumA;
     });
-    const topWs = wsNames.slice(0, 8);
-    const otherWs = wsNames.slice(8);
+    const topWs = wsNames.slice(0, 20);
+    const otherWs = wsNames.slice(20);
     const otherWsData = wsLabels.map((_, i) => otherWs.reduce((sum, ws) => sum + (wsBuckets[ws]?.[i] ?? 0), 0));
     const wsDatasets: Record<string, unknown>[] = topWs.map((ws, i) => ({
       label: ws, data: wsBuckets[ws], backgroundColor: PALETTE[i % PALETTE.length] + '99',
@@ -539,11 +508,29 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
       }, { plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: (ctx: { dataset: { label: string }; raw: number }) => `${ctx.dataset.label}: ${formatNum(ctx.raw)} tokens` } } }, scales: { x: { stacked: true, ticks: { maxTicksLimit: 15 } }, y: { stacked: true, beginAtZero: true, title: { display: true, text: wsYLabel }, ticks: { callback: (v: number) => formatNum(v) } } } });
     }
 
-    return { modelEntries };
-  }
+    // Token Consumption by Harness chart
+    const { labels: hLabels, byWs: hBuckets } = aggregateByWorkspace(
+      data.dailyTokensByHarness.labels, data.dailyTokensByHarness.byHarness, level,
+    );
+    const hNames = Object.keys(hBuckets).sort((a, b) => {
+      const sumA = hBuckets[a].reduce((s, v) => s + v, 0);
+      const sumB = hBuckets[b].reduce((s, v) => s + v, 0);
+      return sumB - sumA;
+    });
+    const hDatasets: Record<string, unknown>[] = hNames.map((h) => ({
+      label: h, data: hBuckets[h],
+      backgroundColor: (harnessColor(h)) + '99',
+      borderColor: harnessColor(h), borderWidth: 1, stack: 'harness',
+    }));
+    if (hDatasets.length > 0) {
+      const hYLabel = level === 'daily' ? 'Tokens/day' : level === 'weekly' ? 'Tokens/week' : 'Tokens/month';
+      createChart('creditTokenByHarnessChart', 'bar', {
+        labels: hLabels,
+        datasets: hDatasets,
+      }, { plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: (ctx: { dataset: { label: string }; raw: number }) => `${ctx.dataset.label}: ${formatNum(ctx.raw)} tokens` } } }, scales: { x: { stacked: true, ticks: { maxTicksLimit: 15 } }, y: { stacked: true, beginAtZero: true, title: { display: true, text: hYLabel }, ticks: { callback: (v: number) => formatNum(v) } } } });
+    }
 
-  function harnessColor(h: string): string {
-    return HARNESS_COLORS[h] || '#6b7280';
+    return { modelEntries };
   }
 
   function renderCreditModelTable(target: HTMLElement, modelEntries: [string, AiCreditRpcData['costByModel'][string]][]): void {
@@ -551,7 +538,7 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
     const hiddenModelCount = modelEntries.length - visibleModelEntries.length;
     const anyCached = visibleModelEntries.some(([, info]) => (info.cacheReadTokens + info.cacheWriteTokens) > 0);
     render(html`
-      <table class="data-table"><thead><tr><th>Model</th><th>Source</th><th>Requests</th><th>Input Tokens</th>${anyCached && html`<th title="Cached input tokens (read + write). Billed at the cached rate (~10% of input rate).">Cached</th>`}<th>Output Tokens</th><th>AI Credits</th><th>Est. Cost</th><th>Data</th></tr></thead><tbody>
+      <table class="data-table"><thead><tr><th>Model</th><th>Source</th><th>Requests</th><th>Input Tokens</th>${anyCached && html`<th title="Cached input tokens (read + write).">Cached</th>`}<th>Output Tokens</th><th>Data</th></tr></thead><tbody>
         ${visibleModelEntries.map(([model, info]) => {
           const dataTag = info.finalizableRequests === 0 && info.requests > 0
             ? html`<span class="missing-badge-inline" title="No finalizable requests for this model \u2014 all are pending or from a source that doesn't record tokens.">N/A</span>`
@@ -566,8 +553,6 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
             <td>${formatNum(info.inputTokens)}</td>
             ${anyCached && html`<td>${cachedTotal > 0 ? formatNum(cachedTotal) : html`<span class="missing-badge-inline">\u2014</span>`}</td>`}
             <td>${formatNum(info.outputTokens)}</td>
-            <td>${info.credits.toFixed(1)}</td>
-            <td>${formatMoney(info.credits / 100)}</td>
             <td>${dataTag}${info.partialRequests > 0 && html` <span class="pending-badge" title=${formatNum(info.partialRequests) + ' output-only requests (input not captured) \u2014 output tokens shown but credits cannot be billed.'}>+${formatNum(info.partialRequests)} partial</span>`}${info.pendingRequests > 0 && html` <span class="pending-badge" title=${formatNum(info.pendingRequests) + ' requests in active/aborted sessions (excluded from missing %)'}>+${formatNum(info.pendingRequests)} pending</span>`}${info.noDataRequests > 0 && html` <span class="pending-badge" title=${formatNum(info.noDataRequests) + " requests where the harness/source did not record token data (excluded from missing %)"}>+${formatNum(info.noDataRequests)} no-data</span>`}</td>
           </tr>`;
         })}
@@ -621,7 +606,7 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
 
   function renderTopRequestsTable(target: HTMLElement, data: AiCreditRpcData): void {
     render(html`
-      <table class="data-table"><thead><tr><th>Date</th><th>Workspace</th><th>Source</th><th>Model</th><th>Total Tokens</th><th>Credits</th><th>Prompt</th></tr></thead><tbody>
+      <table class="data-table"><thead><tr><th>Date</th><th>Workspace</th><th>Source</th><th>Model</th><th>Total Tokens</th><th>Prompt</th></tr></thead><tbody>
         ${data.topRequests.map(req => {
           const d = new Date(req.timestamp).toLocaleDateString();
           const aggregated = req.aggregationKind === 'session-aggregated';
@@ -633,22 +618,16 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
             : req.status === 'no-data' ? html`<span class="missing-badge" title="Source structurally does not record token counts.">no-data</span>`
             : req.status === 'partial' ? html`<span class="missing-badge" title="Only output captured \u2014 total incomplete.">partial</span>`
             : html`<span class="missing-badge" title="No native token count.">missing</span>`;
-          const creditsCell = req.status === 'complete'
-            ? (aggregated ? html`<span class="aggregated-badge" title=${aggTitle}>~${req.credits.toFixed(2)}</span>` : req.credits.toFixed(2))
-            : req.status === 'pending' ? html`<span class="missing-badge" title="Cannot compute credits \u2014 token data not yet finalized.">pending</span>`
-            : req.status === 'no-data' ? html`<span class="missing-badge" title="Cannot compute credits \u2014 source does not record token usage.">no-data</span>`
-            : req.status === 'partial' ? html`<span class="missing-badge" title="Cannot compute credits exactly \u2014 input tokens not captured.">partial</span>`
-            : html`<span class="missing-badge" title="Cannot compute credits \u2014 no billing data">missing</span>`;
           const wsCell = req.workspace || html`<span class="missing-badge">unknown</span>`;
           const harnessCell = req.harness ? html`<span class="harness-badge" style="--harness-color:${harnessColor(req.harness)}" title=${req.harness}>${req.harness}</span>` : '';
-          return html`<tr><td>${d}</td><td>${wsCell}</td><td>${harnessCell}</td><td>${req.model}</td><td>${tokensCell}</td><td>${creditsCell}</td><td><span class="prompt-preview-trigger" onclick=${(e: MouseEvent) => showPromptPopup(e, req.fullPrompt)}>${req.preview.slice(0, 50)}\u2026</span></td></tr>`;
+          return html`<tr><td>${d}</td><td>${wsCell}</td><td>${harnessCell}</td><td>${req.model}</td><td>${tokensCell}</td><td><span class="prompt-preview-trigger" onclick=${(e: MouseEvent) => showPromptPopup(e, req.fullPrompt)}>${req.preview.slice(0, 50)}\u2026</span></td></tr>`;
         })}
       </tbody></table>
       ${data.topRequests.some(r => r.aggregationKind === 'session-aggregated') && html`<p class="credits-note"><span class="aggregated-badge">~value</span> = derived share of session-level totals (per-request data not reported by harness).</p>`}
     `, target);
   }
 
-  async function renderAiCreditsTab(): Promise<void> {
+  async function renderTokenUsageTab(): Promise<void> {
     const target = document.getElementById('output-tab-content')!;
     render(html`<div class="loading-spinner"></div>`, target);
 
@@ -657,64 +636,34 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
     const { missingLabel, partialLabel, pendingLabel, noDataLabel } = buildCreditCoverageSummary(data);
     if (renderAiCreditsEmptyState(target, data)) return;
 
+    const totalTokens = data.totalInputTokens + data.totalOutputTokens;
+
     render(html`
       ${APPROXIMATION_NOTICE}
       <div class="stat-grid" id="creditStats">
-        <${StatCard} label="Total AI Credits" value=${formatNum(Math.round(data.totalCredits))} accent="var(--accent-blue)" />
-        <${StatCard} label="Est. Cost" value=${formatMoney(data.totalCredits / 100)} accent="var(--accent-purple)" />
-        <${StatCard} label="Avg Credits/Request" value=${data.avgCreditsPerRequest.toFixed(2)} accent="var(--accent-green)" />
-        <${StatCard} label="Avg Credits/Day" value=${data.avgCreditsPerDay.toFixed(1)} accent="var(--accent-yellow)" />
+        <${StatCard} label="Total Tokens" value=${formatNum(totalTokens)} accent="var(--accent-blue)" />
+        <${StatCard} label="Input Tokens" value=${formatNum(data.totalInputTokens)} accent="var(--accent-green)" />
+        <${StatCard} label="Output Tokens" value=${formatNum(data.totalOutputTokens)} accent="var(--accent-purple)" />
       </div>
-      <p class="credits-note">1 AI Credit = $0.01 USD. Code completions are free and not counted. Totals reflect ${formatNum(data.countedRequests)} of ${formatNum(data.finalizableRequests)} finalizable requests with billing data (per-request native tokens or session-level totals from the harness). ${missingLabel}${partialLabel}${pendingLabel}${noDataLabel}</p>
+      <p class="credits-note">Totals reflect ${formatNum(data.countedRequests)} of ${formatNum(data.finalizableRequests)} finalizable requests with token data. Code completions are free and not counted. ${missingLabel}${partialLabel}${pendingLabel}${noDataLabel}</p>
       <div class="chart-tabs" style="margin-top:18px">
-        <button class="chart-tab active" data-chart-tab="credits">AI Credits</button>
+        <button class="chart-tab active" data-chart-tab="tokens">Token Consumption</button>
         <button class="chart-tab" data-chart-tab="tokens-ws">Tokens by Workspace</button>
-        <button class="chart-tab" data-chart-tab="overlay">Credits vs Requests</button>
+        <button class="chart-tab" data-chart-tab="tokens-harness">Tokens by Harness</button>
       </div>
       <div id="chartTabCredits" class="chart-tab-panel active"><${CanvasEl} id="creditWeeklyChart" height=${300} title=${creditChartTitle()} /></div>
       <div id="chartTabTokensWs" class="chart-tab-panel"><${CanvasEl} id="creditTokenByWsChart" height=${350} title=${tokenByWsChartTitle()} /></div>
-      <div id="chartTabOverlay" class="chart-tab-panel"><${CanvasEl} id="creditVsRequestsChart" height=${300} title=${overlayChartTitle()} /></div>
-      <div class="two-col"><div class="chart-wrap"><div class="chart-title">Token Breakdown <span class="info-icon" tabindex="0" role="button" aria-label="Token breakdown info">${'\u24d8'}<span class="info-popup">Cache token breakdown (cache read / cache write) is only available for harnesses that report it natively, such as Claude Code and Copilot CLI. VS Code Copilot chat sessions report a single aggregated input token count and do not break out cached vs. uncached tokens — this is a limitation of the upstream data format, not a bug.</span></span></div><canvas id="creditTokenPie" height=${250}></canvas></div><${CanvasEl} id="creditModelBar" height=${250} title="Credit Cost by Model" /></div>
-      <h2>Model Cost Breakdown</h2>
+      <div id="chartTabTokensHarness" class="chart-tab-panel"><${CanvasEl} id="creditTokenByHarnessChart" height=${350} title=${tokenByHarnessChartTitle()} /></div>
+      <div class="chart-wrap"><div class="chart-title">Token Breakdown <span class="info-icon" tabindex="0" role="button" aria-label="Token breakdown info">${'\u24d8'}<span class="info-popup">Cache token breakdown (cache read / cache write) is only available for harnesses that report it natively, such as Claude Code and Copilot CLI. VS Code Copilot chat sessions report a single aggregated input token count and do not break out cached vs. uncached tokens — this is a limitation of the upstream data format, not a bug.</span></span></div><canvas id="creditTokenPie" height=${250}></canvas></div>
+      <h2>Model Token Breakdown</h2>
       <div id="creditModelTable"></div>
-      <h2>Most Expensive Requests</h2>
+      <h2>Top Requests by Token Usage</h2>
       <div id="topRequestsTable"></div>
     `, target);
 
     const { modelEntries } = renderAiCreditsCharts(data);
     renderCreditModelTable(document.getElementById('creditModelTable')!, modelEntries);
     renderTopRequestsTable(document.getElementById('topRequestsTable')!, data);
-
-    // Overlay chart: normalized AI Credits vs Premium Requests (both 0-100% of peak)
-    const cons = await rpc<ConsData>('getConsumption', buildRangeFilter());
-    const useOverlayDaily = activeRangeDays > 0 && activeRangeDays <= 28;
-    const creditSeries = useOverlayDaily ? data.daily : data.weekly;
-    const reqSeries = useOverlayDaily ? cons.daily : cons.weekly;
-    // Align on credit series labels
-    const overlayLabels = creditSeries.labels;
-    const reqValues = overlayLabels.map((label, i) => {
-      const idx = reqSeries.labels.indexOf(label);
-      return idx >= 0 ? reqSeries.values[idx] : (i < reqSeries.values.length ? reqSeries.values[i] : 0);
-    });
-    // Normalize both to percentage of their max
-    const creditMax = Math.max(...creditSeries.credits, 1);
-    const reqMax = Math.max(...reqValues, 1);
-    const creditNorm = creditSeries.credits.map((v: number) => Math.round((v / creditMax) * 1000) / 10);
-    const reqNorm = reqValues.map(v => Math.round((v / reqMax) * 1000) / 10);
-    const granLabel = useOverlayDaily ? 'day' : 'week';
-    createChart('creditVsRequestsChart', 'line', {
-      labels: overlayLabels,
-      datasets: [
-        { label: `AI Credits (peak: ${formatNum(Math.round(creditMax))}/${granLabel})`, data: creditNorm, borderColor: PALETTE[0], backgroundColor: PALETTE[0] + '20', borderWidth: 2, pointRadius: 1, fill: true, tension: 0.3 },
-        { label: `Premium Requests (peak: ${formatNum(Math.round(reqMax))}/${granLabel})`, data: reqNorm, borderColor: PALETTE[3], backgroundColor: PALETTE[3] + '20', borderWidth: 2, pointRadius: 1, fill: true, tension: 0.3 },
-      ],
-    }, {
-      plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: (ctx: { dataset: { label: string }; raw: number }) => `${ctx.dataset.label}: ${ctx.raw}% of peak` } } },
-      scales: {
-        x: { ticks: { maxTicksLimit: 15 } },
-        y: { beginAtZero: true, max: 100, title: { display: true, text: '% of peak' }, ticks: { callback: (v: number) => v + '%' } },
-      },
-    });
 
     // Wire chart tab switching
     for (const btn of target.querySelectorAll<HTMLButtonElement>('.chart-tab')) {
@@ -724,8 +673,8 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
         const tab = btn.dataset.chartTab;
         const panels = target.querySelectorAll<HTMLElement>('.chart-tab-panel');
         for (const p of panels) p.classList.remove('active');
-        const panelMap: Record<string, string> = { credits: 'chartTabCredits', 'tokens-ws': 'chartTabTokensWs', overlay: 'chartTabOverlay' };
-        document.getElementById(panelMap[tab || 'credits'])!.classList.add('active');
+        const panelMap: Record<string, string> = { tokens: 'chartTabCredits', 'tokens-ws': 'chartTabTokensWs', 'tokens-harness': 'chartTabTokensHarness' };
+        document.getElementById(panelMap[tab || 'tokens'])!.classList.add('active');
       });
     }
   }
@@ -733,8 +682,7 @@ export async function renderOutput(container: HTMLElement, currentFilter: DateFi
 
   async function renderActiveTab(): Promise<void> {
     if (activeTab === 'production') await renderProductionTab();
-    else if (activeTab === 'ai-credits') await renderAiCreditsTab();
-    else await renderConsumptionTab();
+    else await renderTokenUsageTab();
   }
 
   // Initial render — honour the persisted active tab

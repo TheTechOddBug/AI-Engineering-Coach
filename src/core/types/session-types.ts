@@ -154,9 +154,8 @@ export interface Session {
    *    interactive  — user typed `claude` in a terminal or used Claude Desktop.
    *    programmatic — spawned by another tool via the SDK (e.g. GitHub Copilot
    *                   agent mode), MCP, GitHub Action, etc.
-   *  Drives the `Claude` vs `Claude (via GHCP)` harness split so token data
-   *  from GHCP-spawned Claude work can be attributed to GHCP without
-   *  cross-source matching. */
+   *  Stored for diagnostics; all Claude sessions use the `Claude` harness
+   *  regardless of launcher kind. */
   launcherKind?: 'interactive' | 'programmatic';
   /** Raw `entrypoint` value from Claude JSONL (`cli`, `sdk-ts`, `sdk-py`,
    *  `mcp`, `claude-code-github-action`, etc.). Stored for diagnostics so the

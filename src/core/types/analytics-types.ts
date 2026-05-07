@@ -70,6 +70,8 @@ export interface CodeProductionData {
     userLoc: number[];
   };
   dailyByWorkspace: Record<string, number[]>;
+  dailyByModel: Record<string, number[]>;
+  dailyByHarness: Record<string, number[]>;
 }
 
 export interface ConsumptionData {
@@ -151,6 +153,7 @@ export interface WorkspaceBreakdown {
 export interface BurndownConfig {
   sku: string;
   customBudget?: number;
+  modelBudgets?: Record<string, number>;
   month?: string;
 }
 
@@ -166,9 +169,6 @@ export interface BurndownData {
   budgetLine: number[];
   status: 'on-track' | 'warning' | 'over-budget';
   recommendation: string;
-  /** True when the active harness filter selects a harness that is excluded
-   *  from premium-request counting (e.g. Claude, Codex, OpenCode). */
-  harnessExcluded?: boolean;
 }
 
 /* ---- AI Credit (usage-based billing) types ---- */
@@ -185,9 +185,7 @@ export interface AiCreditModelBreakdown {
   /** Requests where the harness/source structurally cannot record token data (Xcode, CLI abort-only, etc.).
    *  Permanent and excluded from `missingPct` denominator. */
   noDataRequests: number;
-  /** VS Code-side `claude-*` requests whose authoritative tokens live in the
-   *  matching `Claude (via GHCP)` session. Skipped to avoid double-count and
-   *  excluded from the `missingPct` denominator (it's not a parser gap). */
+  /** @deprecated No longer tracked (Claude harness unified). Always 0. */
   delegatedRequests: number;
   /** Uncached input tokens (subset of `inputTokens`) — used for input-rate billing math. */
   uncachedInputTokens: number;
@@ -223,10 +221,9 @@ export interface AiCreditData {
   pendingRequests: number;
   /** Permanently untracked requests (excluded from `missingPct`). */
   noDataRequests: number;
-  /** VS Code-side `claude-*` requests whose tokens live in `Claude (via GHCP)`.
-   *  Excluded from the `missingPct` denominator — not a coverage gap. */
+  /** @deprecated No longer tracked (Claude harness unified). Always 0. */
   delegatedRequests: number;
-  /** Finalizable requests = `totalRequests - pendingRequests - noDataRequests - delegatedRequests`. */
+  /** Finalizable requests = `totalRequests - pendingRequests - noDataRequests`. */
   finalizableRequests: number;
   /** % of *finalizable* requests with no token data (matches Token Coverage semantics). */
   missingPct: number;
@@ -238,6 +235,9 @@ export interface AiCreditData {
   /** Daily total-token (input + output) consumption broken down by workspace.
    *  `labels` matches `daily.labels`; each workspace key maps to an aligned array of token totals. */
   dailyTokensByWorkspace: { labels: string[]; byWorkspace: Record<string, number[]> };
+  /** Daily total-token (input + output) consumption broken down by harness.
+   *  `labels` matches `daily.labels`; each harness key maps to an aligned array of token totals. */
+  dailyTokensByHarness: { labels: string[]; byHarness: Record<string, number[]> };
   topRequests: Array<{
     timestamp: number;
     model: string;
@@ -245,7 +245,7 @@ export interface AiCreditData {
     outputTokens: number;
     credits: number;
     /** Per-request token-data classification (matches RequestBilling.status). */
-    status: 'complete' | 'partial' | 'pending' | 'delegated' | 'no-data' | 'missing';
+    status: 'complete' | 'partial' | 'pending' | 'no-data' | 'missing';
     /** "exact" = per-request native data; "session-aggregated" = derived from session-level totals (CLI). */
     aggregationKind: 'exact' | 'session-aggregated';
     preview: string;
@@ -403,7 +403,7 @@ export interface AiCreditBurndownData {
   status: 'on-track' | 'warning' | 'will-exceed' | 'no-data' | 'pending-only';
   daysUntilExhaustion: number | null;
   safeDailyBudget: number;
-  projectedOverageUsd: number;
+  projectedOverage: number;
   recommendation: string;
   /** % of *finalizable* requests (excluding pending + no-data) with no token data. */
   missingPct: number;
@@ -417,10 +417,9 @@ export interface AiCreditBurndownData {
   pendingRequests: number;
   /** Permanently untracked requests in the period. */
   noDataRequests: number;
-  /** VS Code-side `claude-*` requests whose tokens live in `Claude (via GHCP)`.
-   *  Excluded from the `missingPct` denominator. */
+  /** @deprecated No longer tracked (Claude harness unified). Always 0. */
   delegatedRequests: number;
-  /** Finalizable requests = total - pending - no-data - delegated. */
+  /** Finalizable requests = total - pending - no-data. */
   finalizableRequests: number;
   /** Per-day request counts in each coverage bucket (length = daysInMonth, index 0 = day 1).
    *  Drives the coverage strip in the Burndown view so users can see *where* in the month
@@ -430,10 +429,12 @@ export interface AiCreditBurndownData {
     partial: number[];
     pending: number[];
     noData: number[];
-    /** Per-day VS Code claude-* requests delegated to Claude (via GHCP). */
+    /** @deprecated No longer tracked. Always zeros. */
     delegated: number[];
     missing: number[];
   };
+  /** Per-model cumulative token consumption for the month. Each entry has daily cumulative values (length = daysInMonth). */
+  byModel: Record<string, { cumulative: number[]; budget: number }>;
 }
 
 export interface HarnessComparisonItem {

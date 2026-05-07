@@ -73,4 +73,15 @@ export class AnalyzerBase {
       return true;
     });
   }
+
+  /** Ensure the day-key array includes fromDate so fillDayRange starts
+   *  from the filter boundary, keeping all charts aligned on the same x-axis. */
+  protected anchorFromDate(keys: string[], f?: DateFilter): string[] {
+    if (!f?.fromDate || f.fromDate <= '0001-01-01') return keys;
+    const sorted = keys.length > 0 ? [...keys].sort() : [];
+    if (sorted.length === 0 || f.fromDate < sorted[0]) {
+      return [f.fromDate, ...keys];
+    }
+    return keys;
+  }
 }

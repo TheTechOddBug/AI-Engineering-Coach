@@ -28,6 +28,7 @@ export class DashboardPanel {
   private readonly panel: vscode.WebviewPanel;
   private readonly extensionUri: vscode.Uri;
   private readonly requestService: PanelRequestService;
+  private readonly globalState: vscode.Memento;
   private readonly disposables: vscode.Disposable[] = [];
 
   private analyzer: Analyzer | undefined;
@@ -38,9 +39,10 @@ export class DashboardPanel {
   private loading = false;
   private loadCompletedAt = 0;
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, _context: vscode.ExtensionContext) {
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, context: vscode.ExtensionContext) {
     this.panel = panel;
     this.extensionUri = extensionUri;
+    this.globalState = context.globalState;
     this.requestService = new PanelRequestService(
       this.panel.webview,
       () => this.analyzer,
@@ -262,6 +264,13 @@ export class DashboardPanel {
   private handleMessage(msg: unknown): void {
     if (this.disposed) return;
     if (!isRequestMessage(msg)) return;
+
+    // Budget persistence — handled before data readiness check
+    if (msg.method === 'saveModelBudgets' || msg.method === 'loadModelBudgets') {
+      this.handleBudgetMessage(msg);
+      return;
+    }
+
     if (this.requestService.tryHandle(msg)) return;
 
     if (!this.dataReady || !this.analyzer || !this.parseResult) {
@@ -303,6 +312,21 @@ export class DashboardPanel {
       if (!this.disposed) {
         try { postResponse(this.panel.webview, msg.id, data); } catch { /* disposed */ }
       }
+    }
+  }
+
+  private static readonly BUDGET_STATE_KEY = 'modelBudgets';
+
+  private handleBudgetMessage(msg: Extract<WebviewMessage, { type: 'request' }>): void {
+    if (msg.method === 'saveModelBudgets') {
+      const budgets = (msg.params as Record<string, unknown>)?.budgets;
+      this.globalState.update(DashboardPanel.BUDGET_STATE_KEY, budgets).then(
+        () => { if (!this.disposed) try { postResponse(this.panel.webview, msg.id, { ok: true }); } catch { /* disposed */ } },
+        () => { if (!this.disposed) try { postResponse(this.panel.webview, msg.id, errorResult('Failed to save budgets')); } catch { /* disposed */ } },
+      );
+    } else {
+      const budgets = this.globalState.get<Record<string, number>>(DashboardPanel.BUDGET_STATE_KEY, {});
+      if (!this.disposed) try { postResponse(this.panel.webview, msg.id, budgets); } catch { /* disposed */ }
     }
   }
 

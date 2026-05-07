@@ -322,7 +322,7 @@ export const HARNESS_COLORS: Record<string, string> = {
   'Xcode': '#147EFB',
   'GitHub Copilot CLI': '#6e40c9',
   'Claude': '#d97706',
-  'Claude (via GHCP)': '#fb923c',
+
   'Codex': '#10b981',
   'OpenCode': '#8b5cf6',
 };

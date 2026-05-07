@@ -84,15 +84,11 @@ export function collectExternalHarnessesSync(workspaces: WorkspaceMap, sessions:
 }
 
 /** Harness values set on sessions by external harness collectors.
- *  A collector may emit more than one harness value (e.g. Claude Code emits
- *  `Claude` for interactive sessions and `Claude (via GHCP)` for sessions
- *  spawned programmatically by GitHub Copilot's agent mode). The cache
- *  reconciliation in parser.ts uses this set to identify and refresh cached
- *  external-harness sessions, so every value the collectors can produce must
- *  be listed here. */
+ *  The cache reconciliation in parser.ts uses this set to identify and
+ *  refresh cached external-harness sessions, so every value the collectors
+ *  can produce must be listed here. */
 export const EXTERNAL_HARNESS_SET = new Set<string>([
   'Claude',
-  'Claude (via GHCP)',
   'Codex',
   'OpenCode',
 ]);

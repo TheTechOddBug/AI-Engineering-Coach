@@ -8,39 +8,6 @@
 import { DateFilter, ConsumptionData, BurndownConfig, BurndownData, SKU_BUDGETS, AiCreditData, AiCreditBurndownData, Session, SessionRequest, ModelUsage, TokenCoverageData, TokenCoverageHarness, TokenCoverageWorkspace, TokenCoverageSession, TokenCoverageTimeline, TokenCoverageTimelineCell } from './types';
 import { toDateStr, normalizeModel, modelMultiplier, isoWeek, resolveTokens, tokenCostInCredits, fillDayRange, fillWeekRange, fillMonthRange } from './helpers';
 import { AnalyzerBase } from './analyzer-base';
-import { SKU_AI_CREDITS } from './constants';
-
-/** Harnesses whose requests count toward GitHub Copilot's premium-request
- *  budget (`SKU_BUDGETS`). Allow-list rather than deny-list so new harnesses
- *  default to "not GHCP-billable" — safer than the alternative.
- *
- *  Excludes:
- *  - `Claude` / `Claude (via GHCP)` — Claude JSONL records work that is either
- *    paid via Anthropic plan (interactive) or already billed on the GHCP side
- *    via the VS Code chatSessions log (programmatic). Counting them here
- *    would double-count.
- *  - `Codex` / `OpenCode` — paid through OpenAI plan / BYO key, not GHCP. */
-const GHCP_BILLABLE_HARNESSES: ReadonlySet<string> = new Set([
-  'GitHub Copilot',
-  'Local Agent',
-  'Local Agent (Insiders)',
-  'GitHub Copilot CLI',
-  'Xcode',
-]);
-
-/** Harnesses whose requests count toward the GitHub Copilot AI Credit
- *  (`SKU_AI_CREDITS`) budget. Includes `Claude (via GHCP)` because that
- *  harness *is* GHCP work, just observed from the Claude JSONL side.
- *  Excludes interactive `Claude`, `Codex`, `OpenCode` because those are
- *  paid through other plans. */
-const AI_CREDIT_HARNESSES: ReadonlySet<string> = new Set([
-  'GitHub Copilot',
-  'Local Agent',
-  'Local Agent (Insiders)',
-  'GitHub Copilot CLI',
-  'Xcode',
-  'Claude (via GHCP)',
-]);
 
 /** Per-request billing token attribution.
  *
@@ -54,11 +21,6 @@ const AI_CREDIT_HARNESSES: ReadonlySet<string> = new Set([
  *  - `pending`    — the parent session is still active or was aborted before
  *                   any model response. Excluded from the missing% denominator
  *                   because token data was never finalizable.
- *  - `delegated`  — VS Code request routed to a `claude-*` model. The
- *                   authoritative token data lives on the Claude (via GHCP)
- *                   side, so we intentionally skip the VS Code-side tokens to
- *                   avoid double-counting. Excluded from credits and from the
- *                   missing% denominator (it's not a parser gap).
  *  - `missing`    — no token data and no excuse — a real coverage gap. */
 interface RequestBilling {
   uncachedInput: number;
@@ -71,12 +33,10 @@ interface RequestBilling {
    *    complete   — both input and output token counts are known.
    *    partial    — only output is known (e.g. VS Code top-level r.completionTokens).
    *    pending    — request not yet finalized; tokens may still arrive.
-   *    delegated  — VS Code claude-* request whose tokens are owned by the
-   *                 Claude (via GHCP) side. Skipped to avoid double-count.
    *    no-data    — request finalized but the harness/source did not record token
    *                 usage (Xcode never captures, some VS Code copilot/auto reqs,
    *                 CLI turns aborted before any model output). Permanent. */
-  status: 'complete' | 'partial' | 'pending' | 'delegated' | 'no-data' | 'missing';
+  status: 'complete' | 'partial' | 'pending' | 'no-data' | 'missing';
   /** Output tokens captured for partial requests (output-only data). 0 otherwise. */
   partialOutput: number;
   /** Provenance of the input/output values when `status === 'complete'`. */
@@ -91,53 +51,11 @@ interface RequestBilling {
 function harnessUsesSessionAggregated(harness: string | undefined): boolean {
   return harness === 'GitHub Copilot CLI' || harness === 'Codex';
 }
-
-/** Detect a VS Code-side request that was routed to Claude. The model
- *  actually executed the work via the Claude SDK, which writes its own
- *  high-fidelity token record under `~/.claude/projects/` (parsed as
- *  `Claude (via GHCP)`). Counting tokens on both sides would double-bill, so
- *  these requests are flagged `delegated` and contribute zero credits.
- *
- *  Limited to GHCP-billable harnesses so that, e.g., a `Claude (via GHCP)`
- *  session itself is not labeled "delegated" — it owns its tokens. */
-function isDelegatedClaudeRequest(session: Session, request: SessionRequest): boolean {
-  if (!GHCP_BILLABLE_HARNESSES.has(session.harness)) return false;
-  const model = request.modelId;
-  if (typeof model !== 'string') return false;
-  return normalizeModel(model).startsWith('claude-');
-}
-
-function makeDelegatedBilling(): RequestBilling {
-  return {
-    uncachedInput: 0,
-    totalInput: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    credits: 0,
-    status: 'delegated',
-    partialOutput: 0,
-    kind: 'exact',
-  };
-}
-
 function computeBilling(sessions: Session[]): Map<SessionRequest, RequestBilling> {
   const map = new Map<SessionRequest, RequestBilling>();
   for (const session of sessions) {
-    // Tag GHCP-side claude-* requests as delegated upfront so neither the
-    // session-aggregated path nor the per-request path attributes their
-    // tokens. The authoritative count comes from the matching
-    // Claude (via GHCP) session parsed from `~/.claude`.
-    const delegatedRequests = new Set<SessionRequest>();
-    for (const r of session.requests) {
-      if (isDelegatedClaudeRequest(session, r)) {
-        map.set(r, makeDelegatedBilling());
-        delegatedRequests.add(r);
-      }
-    }
-
     if (session.modelUsage) {
-      attributeSessionLevel(session, session.modelUsage, map, delegatedRequests);
+      attributeSessionLevel(session, session.modelUsage, map, new Set());
     } else {
       const isPending = session.endReason === 'active' || session.endReason === 'aborted';
       // For session-aggregated harnesses with no shutdown totals yet, treat
@@ -145,7 +63,6 @@ function computeBilling(sessions: Session[]): Map<SessionRequest, RequestBilling
       // per-request output entirely once the session shuts down.
       const preferPending = isPending && harnessUsesSessionAggregated(session.harness);
       for (const r of session.requests) {
-        if (delegatedRequests.has(r)) continue;
         attributePerRequest(r, map, isPending, preferPending);
       }
     }
@@ -160,19 +77,10 @@ function computeBilling(sessions: Session[]): Map<SessionRequest, RequestBilling
  *  `0` when the denominator is zero — callers should check `finalizable`
  *  separately to distinguish "0% missing because perfect coverage" from
  *  "no finalizable requests in this slice." */
-/** Compute "missing %" using the same denominator semantics as Token Coverage:
- *  pending and no-data requests are excluded from the denominator because
- *  neither category can ever produce token data (pending = in-flight, may yet
- *  arrive; no-data = harness/source structurally cannot record). `delegated`
- *  requests are also excluded — the tokens exist, just on the
- *  `Claude (via GHCP)` side. Returns `0` when the denominator is zero —
- *  callers should check `finalizable` separately to distinguish "0% missing
- *  because perfect coverage" from "no finalizable requests in this slice." */
 export function computeMissingPct(
   requests: number, counted: number, partial: number, pending: number, noData: number,
-  delegated: number = 0,
 ): number {
-  const denom = requests - pending - noData - delegated;
+  const denom = requests - pending - noData;
   if (denom <= 0) return 0;
   const missing = denom - counted - partial;
   return Math.round((missing / denom) * 100);
@@ -184,8 +92,6 @@ interface AiCreditModelEntry {
   partialRequests: number;
   pendingRequests: number;
   noDataRequests: number;
-  /** VS Code claude-* requests delegated to Claude (via GHCP). */
-  delegatedRequests: number;
   missingRequests: number;
   uncachedInputTokens: number;
   inputTokens: number;
@@ -304,23 +210,8 @@ function attributePerRequest(
 
 export class ConsumptionAnalyzer extends AnalyzerBase {
 
-  /** True if the request belongs to a session whose harness counts toward
-   *  GitHub Copilot's premium-request budget. */
-  private isGhcpBillable(request: SessionRequest): boolean {
-    const session = this.requestSessionMap.get(request);
-    return session ? GHCP_BILLABLE_HARNESSES.has(session.harness) : false;
-  }
-
-  /** True if the request belongs to a session whose harness counts toward
-   *  GitHub Copilot's AI Credit budget. Includes `Claude (via GHCP)` because
-   *  that's the authoritative token source for GHCP-spawned Claude work. */
-  private isAiCreditBillable(request: SessionRequest): boolean {
-    const session = this.requestSessionMap.get(request);
-    return session ? AI_CREDIT_HARNESSES.has(session.harness) : false;
-  }
-
   getConsumption(f?: DateFilter): ConsumptionData {
-    const reqs = this.filter(f).filter(r => this.isGhcpBillable(r));
+    const reqs = this.filter(f);
     const modelTotals = new Map<string, number>();
     const dailyMap = new Map<string, Map<string, number>>();
     const weeklyMap = new Map<string, Map<string, number>>();
@@ -394,8 +285,7 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     const monthStart = `${targetMonth}-01`;
     const monthEnd = `${targetMonth}-${String(daysInMonth).padStart(2, '0')}`;
 
-    const reqs = this.filter({ ...f, fromDate: monthStart, toDate: monthEnd })
-      .filter(r => this.isGhcpBillable(r));
+    const reqs = this.filter({ ...f, fromDate: monthStart, toDate: monthEnd });
     const dailyReqs = new Map<number, number>();
     for (const r of reqs) {
       const d = new Date(r.timestamp!).getDate();
@@ -438,8 +328,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       recommendation = `Healthy usage. ${remaining} requests remaining. Projected ${Math.round(projected)} of ${budget}.`;
     }
 
-    const harnessExcluded = !!(f?.harness && !GHCP_BILLABLE_HARNESSES.has(f.harness));
-
     return {
       currentMonth: targetMonth,
       daysInMonth, dayOfMonth, budget,
@@ -447,14 +335,13 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       dailyConsumption: { labels, values, cumulative },
       projectedLine, budgetLine,
       status, recommendation,
-      harnessExcluded,
     };
   }
 
   /* ---- AI Credit (usage-based billing) analytics ---- */
 
   getAiCredits(f?: DateFilter): AiCreditData {
-    const reqs = this.filter(f).filter(r => this.isAiCreditBillable(r));
+    const reqs = this.filter(f);
     const billing = computeBilling(this.sessions);
     const summary = this.createAiCreditSummary();
 
@@ -462,7 +349,7 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       this.applyAiCreditRequest(summary, request, billing.get(request));
     }
 
-    summary.topRequests.sort((a, b) => b.credits - a.credits);
+    summary.topRequests.sort((a, b) => (b.inputTokens + b.outputTokens) - (a.inputTokens + a.outputTokens));
     summary.topRequests.splice(10);
     const allModels = Array.from(summary.costByModel.keys()).sort((a, b) =>
       (summary.costByModel.get(b)?.credits || 0) - (summary.costByModel.get(a)?.credits || 0)
@@ -482,15 +369,16 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       partialRequests: summary.partialCount,
       pendingRequests: summary.pendingCount,
       noDataRequests: summary.noDataCount,
-      delegatedRequests: summary.delegatedCount,
-      finalizableRequests: reqs.length - summary.pendingCount - summary.noDataCount - summary.delegatedCount,
-      missingPct: computeMissingPct(reqs.length, summary.countedCount, summary.partialCount, summary.pendingCount, summary.noDataCount, summary.delegatedCount),
+      delegatedRequests: 0,
+      finalizableRequests: reqs.length - summary.pendingCount - summary.noDataCount,
+      missingPct: computeMissingPct(reqs.length, summary.countedCount, summary.partialCount, summary.pendingCount, summary.noDataCount),
       avgCreditsPerRequest: summary.countedCount > 0 ? Math.round((summary.totalCredits / summary.countedCount) * 100) / 100 : 0,
       avgCreditsPerDay: Math.round((summary.totalCredits / Math.max(countedDays.size, 1)) * 100) / 100,
       costByModel: this.buildAiCreditCostByModel(summary.costByModel),
-      daily: this.buildAiCreditSeries(summary.dailyMap, allModels, fillDayRange),
+      daily: this.buildAiCreditSeries(summary.dailyMap, allModels, keys => fillDayRange(this.anchorFromDate(keys, f))),
       weekly: this.buildAiCreditSeries(summary.weeklyMap, allModels, fillWeekRange),
-      dailyTokensByWorkspace: this.buildDailyTokensByWorkspace(summary.dailyTokensByWorkspace, fillDayRange),
+      dailyTokensByWorkspace: this.buildDailyTokensByWorkspace(summary.dailyTokensByWorkspace, keys => fillDayRange(this.anchorFromDate(keys, f))),
+      dailyTokensByHarness: this.buildDailyTokensByHarness(summary.dailyTokensByHarness, keys => fillDayRange(this.anchorFromDate(keys, f))),
       topRequests: summary.topRequests,
     };
   }
@@ -501,6 +389,8 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     weeklyMap: Map<string, Map<string, number>>;
     /** workspace → day → total tokens (input + output). */
     dailyTokensByWorkspace: Map<string, Map<string, number>>;
+    /** harness → day → total tokens (input + output). */
+    dailyTokensByHarness: Map<string, Map<string, number>>;
     totalInputTokens: number;
     totalOutputTokens: number;
     totalCacheReadTokens: number;
@@ -510,7 +400,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     partialCount: number;
     pendingCount: number;
     noDataCount: number;
-    delegatedCount: number;
     topRequests: AiCreditData['topRequests'];
   } {
     return {
@@ -518,6 +407,7 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       dailyMap: new Map<string, Map<string, number>>(),
       weeklyMap: new Map<string, Map<string, number>>(),
       dailyTokensByWorkspace: new Map<string, Map<string, number>>(),
+      dailyTokensByHarness: new Map<string, Map<string, number>>(),
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCacheReadTokens: 0,
@@ -527,7 +417,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       partialCount: 0,
       pendingCount: 0,
       noDataCount: 0,
-      delegatedCount: 0,
       topRequests: [],
     };
   }
@@ -576,7 +465,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     else if (billing.status === 'partial') summary.partialCount++;
     else if (billing.status === 'pending') summary.pendingCount++;
     else if (billing.status === 'no-data') summary.noDataCount++;
-    else if (billing.status === 'delegated') summary.delegatedCount++;
 
     if (billing.status !== 'complete') return;
     summary.totalInputTokens += billing.totalInput;
@@ -598,7 +486,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       partialRequests: 0,
       pendingRequests: 0,
       noDataRequests: 0,
-      delegatedRequests: 0,
       missingRequests: 0,
       uncachedInputTokens: 0,
       inputTokens: 0,
@@ -625,8 +512,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       entry.pendingRequests++;
     } else if (billing.status === 'no-data') {
       entry.noDataRequests++;
-    } else if (billing.status === 'delegated') {
-      entry.delegatedRequests++;
     } else {
       entry.missingRequests++;
     }
@@ -639,19 +524,28 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     request: SessionRequest,
     billing: RequestBilling,
   ): void {
-    if (billing.status !== 'complete') return;
+    if (billing.status !== 'complete' && billing.status !== 'partial') return;
     const day = toDateStr(request.timestamp!);
     const week = isoWeek(new Date(request.timestamp!));
+    const totalTokens = billing.status === 'complete'
+      ? billing.totalInput + billing.output
+      : billing.partialOutput;
     for (const [mapRef, key] of [[summary.dailyMap, day], [summary.weeklyMap, week]] as const) {
       if (!mapRef.has(key)) mapRef.set(key, new Map());
       const inner = mapRef.get(key)!;
-      inner.set(model, (inner.get(model) || 0) + billing.credits);
+      inner.set(model, (inner.get(model) || 0) + totalTokens);
     }
-    // Accumulate total tokens (input + output) per workspace per day
-    const ws = this.requestSessionMap.get(request)?.workspaceName || 'unknown';
+    // Accumulate total tokens (input + output) per workspace and per harness per day
+    const session = this.requestSessionMap.get(request);
+    const ws = session?.workspaceName || 'unknown';
     if (!summary.dailyTokensByWorkspace.has(ws)) summary.dailyTokensByWorkspace.set(ws, new Map());
     const wsDay = summary.dailyTokensByWorkspace.get(ws)!;
-    wsDay.set(day, (wsDay.get(day) || 0) + billing.totalInput + billing.output);
+    wsDay.set(day, (wsDay.get(day) || 0) + totalTokens);
+
+    const harness = session?.harness || 'unknown';
+    if (!summary.dailyTokensByHarness.has(harness)) summary.dailyTokensByHarness.set(harness, new Map());
+    const hDay = summary.dailyTokensByHarness.get(harness)!;
+    hDay.set(day, (hDay.get(day) || 0) + totalTokens);
   }
 
   private buildAiCreditSeries(
@@ -669,11 +563,11 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       const inner = map.get(label);
       let dayTotal = 0;
       if (inner) { for (const value of inner.values()) dayTotal += value; }
-      credits.push(Math.round(dayTotal * 100) / 100);
+      credits.push(Math.round(dayTotal));
       runningTotal += dayTotal;
-      cumulative.push(Math.round(runningTotal * 100) / 100);
+      cumulative.push(Math.round(runningTotal));
       for (const model of allModels) {
-        byModel[model].push(Math.round((inner?.get(model) || 0) * 100) / 100);
+        byModel[model].push(Math.round(inner?.get(model) || 0));
       }
     }
     return { labels, credits, cumulative, byModel };
@@ -695,19 +589,35 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     return { labels, byWorkspace };
   }
 
+  private buildDailyTokensByHarness(
+    harnessMap: Map<string, Map<string, number>>,
+    fillRange: (keys: string[]) => string[],
+  ): AiCreditData['dailyTokensByHarness'] {
+    const allDays = new Set<string>();
+    for (const dayMap of harnessMap.values()) {
+      for (const day of dayMap.keys()) allDays.add(day);
+    }
+    const labels = fillRange(Array.from(allDays));
+    const byHarness: Record<string, number[]> = {};
+    for (const [harness, dayMap] of harnessMap) {
+      byHarness[harness] = labels.map(d => Math.round(dayMap.get(d) || 0));
+    }
+    return { labels, byHarness };
+  }
+
   private buildAiCreditCostByModel(
     costByModel: Map<string, AiCreditModelEntry>,
   ): Record<string, AiCreditData['costByModel'][string]> {
     const out: Record<string, AiCreditData['costByModel'][string]> = {};
     for (const [model, entry] of costByModel) {
-      const finalizableRequests = entry.requests - entry.pendingRequests - entry.noDataRequests - entry.delegatedRequests;
+      const finalizableRequests = entry.requests - entry.pendingRequests - entry.noDataRequests;
       out[model] = {
         requests: entry.requests,
         countedRequests: entry.countedRequests,
         partialRequests: entry.partialRequests,
         pendingRequests: entry.pendingRequests,
         noDataRequests: entry.noDataRequests,
-        delegatedRequests: entry.delegatedRequests,
+        delegatedRequests: 0,
         finalizableRequests,
         uncachedInputTokens: Math.round(entry.uncachedInputTokens),
         inputTokens: Math.round(entry.inputTokens),
@@ -715,7 +625,7 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
         cacheReadTokens: Math.round(entry.cacheReadTokens),
         cacheWriteTokens: Math.round(entry.cacheWriteTokens),
         credits: entry.credits,
-        missingPct: computeMissingPct(entry.requests, entry.countedRequests, entry.partialRequests, entry.pendingRequests, entry.noDataRequests, entry.delegatedRequests),
+        missingPct: computeMissingPct(entry.requests, entry.countedRequests, entry.partialRequests, entry.pendingRequests, entry.noDataRequests),
         harnesses: Array.from(entry.harnesses).sort(),
       };
     }
@@ -723,7 +633,8 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
   }
 
   getAiCreditBurndown(config: BurndownConfig, f?: DateFilter): AiCreditBurndownData {
-    const budget = config.customBudget ?? SKU_AI_CREDITS[config.sku] ?? 1900;
+    const modelBudgetsIn = config.modelBudgets ?? {};
+    const budget = config.customBudget ?? Object.values(modelBudgetsIn).reduce((a, b) => a + b, 0);
     const now = new Date();
     const targetMonth = config.month || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     const [yr, mo] = targetMonth.split('-').map(Number);
@@ -731,20 +642,20 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     const dayOfMonth = (yr === now.getFullYear() && mo === now.getMonth() + 1) ? now.getDate() : daysInMonth;
     const monthStart = `${targetMonth}-01`;
     const monthEnd = `${targetMonth}-${String(daysInMonth).padStart(2, '0')}`;
-    const reqs = this.filter({ ...f, fromDate: monthStart, toDate: monthEnd })
-      .filter(r => this.isAiCreditBillable(r));
+    const reqs = this.filter({ ...f, fromDate: monthStart, toDate: monthEnd });
     const burndown = this.buildAiCreditBurndownData(reqs, computeBilling(this.sessions), daysInMonth);
-    const series = this.buildAiCreditBurndownSeries(burndown.dailyCredits, daysInMonth);
-    const consumed = Math.round(series.total * 100) / 100;
+    const series = this.buildAiCreditBurndownSeries(burndown.dailyTokens, daysInMonth);
+    const consumed = Math.round(series.total);
     const dailyRate = dayOfMonth > 0 ? consumed / dayOfMonth : 0;
-    const projected = Math.round(dailyRate * daysInMonth * 100) / 100;
-    const projectedLine = series.labels.map((_, i) => Math.round(dailyRate * (i + 1) * 100) / 100);
-    const budgetLine = series.labels.map((_, i) => Math.round((budget / daysInMonth) * (i + 1) * 100) / 100);
-    const remaining = budget - consumed;
-    const safeDailyBudget = daysInMonth > dayOfMonth ? Math.round((remaining / (daysInMonth - dayOfMonth)) * 100) / 100 : 0;
-    const daysUntilExhaustion = dailyRate > 0 ? Math.round(remaining / dailyRate) : null;
-    const projectedOverageUsd = Math.round(Math.max(0, projected - budget)) / 100;
-    const missingPct = computeMissingPct(reqs.length, burndown.countedCount, burndown.partialCount, burndown.pendingCount, burndown.noDataCount, burndown.delegatedCount);
+    const projected = Math.round(dailyRate * daysInMonth);
+    const projectedLine = series.labels.map((_, i) => Math.round(dailyRate * (i + 1)));
+    // Budget line is a flat horizontal line at the budget value (a ceiling)
+    const budgetLine = series.labels.map(() => budget);
+    const remaining = budget > 0 ? budget - consumed : 0;
+    const safeDailyBudget = budget > 0 && daysInMonth > dayOfMonth ? Math.round(remaining / (daysInMonth - dayOfMonth)) : 0;
+    const daysUntilExhaustion = budget > 0 && dailyRate > 0 ? Math.round(remaining / dailyRate) : null;
+    const projectedOverage = budget > 0 ? Math.max(0, projected - budget) : 0;
+    const missingPct = computeMissingPct(reqs.length, burndown.countedCount, burndown.partialCount, burndown.pendingCount, burndown.noDataCount);
     const recommendation = this.getAiCreditBurndownRecommendation({
       budget,
       consumed,
@@ -757,6 +668,18 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       missingPct,
       remaining,
     });
+
+    // Build per-model cumulative data
+    const byModel: Record<string, { cumulative: number[]; budget: number }> = {};
+    for (const [model, dayMap] of burndown.dailyTokensByModel) {
+      const cumulative: number[] = [];
+      let running = 0;
+      for (let day = 1; day <= daysInMonth; day++) {
+        running += dayMap.get(day) || 0;
+        cumulative.push(Math.round(running));
+      }
+      byModel[model] = { cumulative, budget: modelBudgetsIn[model] || 0 };
+    }
 
     return {
       currentMonth: targetMonth,
@@ -772,16 +695,17 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       recommendation: recommendation.recommendation,
       daysUntilExhaustion,
       safeDailyBudget,
-      projectedOverageUsd,
+      projectedOverage,
       missingPct,
       totalRequests: reqs.length,
       countedRequests: burndown.countedCount,
       partialRequests: burndown.partialCount,
       pendingRequests: burndown.pendingCount,
       noDataRequests: burndown.noDataCount,
-      delegatedRequests: burndown.delegatedCount,
-      finalizableRequests: reqs.length - burndown.pendingCount - burndown.noDataCount - burndown.delegatedCount,
+      delegatedRequests: 0,
+      finalizableRequests: reqs.length - burndown.pendingCount - burndown.noDataCount,
       coverageByDay: burndown.coverageByDay,
+      byModel,
     };
   }
 
@@ -790,15 +714,16 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     billing: Map<SessionRequest, RequestBilling>,
     daysInMonth: number,
   ): {
-    dailyCredits: Map<number, number>;
+    dailyTokens: Map<number, number>;
+    dailyTokensByModel: Map<string, Map<number, number>>;
     coverageByDay: AiCreditBurndownData['coverageByDay'];
     countedCount: number;
     partialCount: number;
     pendingCount: number;
     noDataCount: number;
-    delegatedCount: number;
   } {
-    const dailyCredits = new Map<number, number>();
+    const dailyTokens = new Map<number, number>();
+    const dailyTokensByModel = new Map<string, Map<number, number>>();
     const coverageByDay = {
       complete: Array<number>(daysInMonth).fill(0),
       partial: Array<number>(daysInMonth).fill(0),
@@ -811,7 +736,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     let partialCount = 0;
     let pendingCount = 0;
     let noDataCount = 0;
-    let delegatedCount = 0;
 
     for (const request of reqs) {
       const requestBilling = billing.get(request);
@@ -823,29 +747,31 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
           status === 'partial' ? 'partial' :
           status === 'pending' ? 'pending' :
           status === 'no-data' ? 'noData' :
-          status === 'delegated' ? 'delegated' :
           'missing';
         coverageByDay[bucket][dayIdx]++;
       }
       if (status === 'complete') {
         countedCount++;
-        dailyCredits.set(dayIdx + 1, (dailyCredits.get(dayIdx + 1) || 0) + (requestBilling?.credits ?? 0));
+        const tokens = (requestBilling?.totalInput ?? 0) + (requestBilling?.output ?? 0);
+        dailyTokens.set(dayIdx + 1, (dailyTokens.get(dayIdx + 1) || 0) + tokens);
+        const model = normalizeModel(request.modelId ?? 'unknown');
+        if (!dailyTokensByModel.has(model)) dailyTokensByModel.set(model, new Map());
+        const modelDay = dailyTokensByModel.get(model)!;
+        modelDay.set(dayIdx + 1, (modelDay.get(dayIdx + 1) || 0) + tokens);
       } else if (status === 'partial') {
         partialCount++;
       } else if (status === 'pending') {
         pendingCount++;
       } else if (status === 'no-data') {
         noDataCount++;
-      } else if (status === 'delegated') {
-        delegatedCount++;
       }
     }
 
-    return { dailyCredits, coverageByDay, countedCount, partialCount, pendingCount, noDataCount, delegatedCount };
+    return { dailyTokens, dailyTokensByModel, coverageByDay, countedCount, partialCount, pendingCount, noDataCount };
   }
 
   private buildAiCreditBurndownSeries(
-    dailyCredits: Map<number, number>,
+    dailyTokens: Map<number, number>,
     daysInMonth: number,
   ): { labels: string[]; values: number[]; cumulative: number[]; total: number } {
     const labels: string[] = [];
@@ -854,10 +780,10 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     let total = 0;
     for (let day = 1; day <= daysInMonth; day++) {
       labels.push(String(day));
-      const value = dailyCredits.get(day) || 0;
-      values.push(Math.round(value * 100) / 100);
+      const value = dailyTokens.get(day) || 0;
+      values.push(Math.round(value));
       total += value;
-      cumulative.push(Math.round(total * 100) / 100);
+      cumulative.push(Math.round(total));
     }
     return { labels, values, cumulative, total };
   }
@@ -890,29 +816,29 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
       if (params.noDataCount === params.totalRequests) {
         return {
           status: 'no-data',
-          recommendation: `All ${params.totalRequests} request${params.totalRequests === 1 ? '' : 's'} in this period are from sources that don't record token usage (e.g. Xcode). Credit math is not possible for this slice.`,
+          recommendation: `All ${params.totalRequests} request${params.totalRequests === 1 ? '' : 's'} in this period are from sources that don't record token usage (e.g. Xcode). Token budget tracking is not possible for this slice.`,
         };
       }
       return {
         status: 'no-data',
-        recommendation: `No native token data available for any of the ${params.totalRequests} requests in this period — the harness did not report token counts, so credit usage cannot be computed.`,
+        recommendation: `No native token data available for any of the ${params.totalRequests} requests in this period — the harness did not report token counts, so token usage cannot be computed.`,
       };
     }
     if (params.consumed > params.budget) {
       return {
         status: 'will-exceed',
-        recommendation: `Over budget by ${Math.round(params.consumed - params.budget)} credits ($${((params.consumed - params.budget) / 100).toFixed(2)}). Consider using lighter models or shorter prompts.${partialNote}`,
+        recommendation: `Over budget by ${Math.round(params.consumed - params.budget).toLocaleString()} tokens. Consider using lighter models or shorter prompts.${partialNote}`,
       };
     }
     if (params.projected > params.budget * 0.9) {
       return {
         status: 'warning',
-        recommendation: `On pace to exceed budget. ${Math.round(params.remaining)} credits remaining, ~${Math.round(params.safeDailyBudget)}/day safe. Consider switching to GPT-5 mini or Gemini Flash.${partialNote}`,
+        recommendation: `On pace to exceed budget. ${Math.round(params.remaining).toLocaleString()} tokens remaining, ~${Math.round(params.safeDailyBudget).toLocaleString()}/day safe. Consider switching to GPT-5 mini or Gemini Flash.${partialNote}`,
       };
     }
     return {
       status: 'on-track',
-      recommendation: `Healthy usage. ${Math.round(params.remaining)} credits remaining. Projected ${Math.round(params.projected)} of ${params.budget}.${partialNote}`,
+      recommendation: `Healthy usage. ${Math.round(params.remaining).toLocaleString()} tokens remaining. Projected ${Math.round(params.projected).toLocaleString()} of ${params.budget.toLocaleString()}.${partialNote}`,
     };
   }
 
@@ -1061,17 +987,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
         harnessEntry.noData++;
         workspaceEntry.noData++;
         sessionEntry.noData++;
-      } else if (status === 'delegated') {
-        // VS Code claude-* request whose tokens live in Claude (via GHCP).
-        // Bucket alongside no-data: same effect on the missing% denominator
-        // (excluded), and the user can drill into the Claude (via GHCP)
-        // session for the actual data. Tracking a distinct UI bucket can
-        // come later — for now keep the token-coverage view focused on
-        // genuine parser gaps.
-        noDataRequests++;
-        harnessEntry.noData++;
-        workspaceEntry.noData++;
-        sessionEntry.noData++;
       } else {
         missingRequests++;
       }
@@ -1164,10 +1079,6 @@ export class ConsumptionAnalyzer extends AnalyzerBase {
     else if (status === 'partial') cell.partial++;
     else if (status === 'pending') cell.pending++;
     else if (status === 'no-data') cell.noData++;
-    // `delegated` is bucketed with no-data for missing% math (see comment in
-    // buildTokenCoverageMap). The bucket itself stays separate in the
-    // delegated-tracking code paths used by AI Credits.
-    else if (status === 'delegated') cell.noData++;
   }
 
   private getTokenCoverageSource(hasCounted: number, hasPartial: number, hasExact: boolean, hasAggregated: boolean): TokenCoverageHarness['source'] {

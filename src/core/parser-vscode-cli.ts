@@ -210,7 +210,21 @@ function handleToolExecutionStart(ev: CLIEvent, state: CLIParseState): void {
 
   if (ts && turn.firstToolTs === null) turn.firstToolTs = ts;
   if (toolName && !META_TOOLS.has(toolName)) turn.toolNames.add(toolName);
-  if (FILE_EDIT_TOOLS.has(toolName) && typeof args.path === 'string') turn.editedFiles.add(args.path);
+  if (FILE_EDIT_TOOLS.has(toolName) && typeof args.path === 'string') {
+    turn.editedFiles.add(args.path);
+    // Include generated code content so extractCodeBlocks() can detect AI-produced code.
+    // CLI tools use snake_case field names: create → file_text, edit → new_str.
+    const code = typeof args.file_text === 'string' ? args.file_text
+      : typeof args.content === 'string' ? args.content
+        : typeof args.new_str === 'string' ? args.new_str
+          : typeof args.newString === 'string' ? args.newString
+            : typeof args.code === 'string' ? args.code
+              : null;
+    if (code) {
+      const ext = args.path.split('.').pop() || 'unknown';
+      turn.responseChunks.push(`\`\`\`${ext}\n${code}\n\`\`\``);
+    }
+  }
   if (FILE_REF_TOOLS.has(toolName) && typeof args.path === 'string') turn.referencedFiles.add(args.path);
   if (toolName === 'skill' && typeof args.skill === 'string') turn.skillsUsed.add(args.skill);
 }

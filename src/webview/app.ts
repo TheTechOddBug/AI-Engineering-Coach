@@ -5,7 +5,7 @@
 
 /* Webview entry -- runs in the browser context inside the VS Code webview */
 
-import { AntiPatternData, BurndownData, DateFilter, StatsResult } from '../core/types';
+import { AntiPatternData, DateFilter, StatsResult } from '../core/types';
 import { $, $$, rpc, destroyCharts, initMessageListener, withErrorBoundary } from './shared';
 import { html, render, unmount, ComponentChildren } from './render';
 import { renderDashboard } from './page-dashboard';
@@ -52,10 +52,6 @@ function refreshNavBadges(filter: DateFilter): void {
 
   void rpc<AntiPatternData>('getAntiPatterns', filter as Record<string, unknown>).then(d => {
     setBadge('badge-antipatterns', d.patterns.length);
-  }).catch(() => {});
-
-  void rpc<BurndownData>('getBurndown', { config: { sku: 'pro' }, filter: filter as Record<string, unknown> }).then(d => {
-    setBadge('badge-burndown', `${d.consumed}/${d.budget}`);
   }).catch(() => {});
 
   void rpc<{ summary: { totalAiLoc: number } }>('getCodeProduction', filter as Record<string, unknown>).then(d => {

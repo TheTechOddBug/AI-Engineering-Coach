@@ -157,6 +157,17 @@ function applyOpenCodePart(part: OcPart, data: Pick<OpenCodeAssistantData, 'tool
   const toolLower = part.tool.toLowerCase();
   if (WRITE_TOOLS.has(toolLower)) {
     data.editedFiles.push(filePath);
+    // Include generated code content so extractCodeBlocks() can detect AI-produced code.
+    // Write tools store the code in various input fields; also check state.output.
+    const content = typeof input.content === 'string' ? input.content
+      : typeof input.code === 'string' ? input.code
+        : typeof input.new_string === 'string' ? input.new_string
+          : typeof part.state?.output === 'string' ? part.state.output
+            : null;
+    if (content) {
+      const ext = filePath.split('.').pop() || 'unknown';
+      textParts.push(`\n\`\`\`${ext}\n${content}\n\`\`\`\n`);
+    }
   } else if (READ_TOOLS.has(toolLower)) {
     data.referencedFiles.push(filePath);
   }

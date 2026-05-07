@@ -72,8 +72,8 @@ function classifyLauncher(entrypoint: string | undefined): 'interactive' | 'prog
   return entrypoint && INTERACTIVE_ENTRYPOINTS.has(entrypoint) ? 'interactive' : 'programmatic';
 }
 
-function harnessForLauncher(launcherKind: 'interactive' | 'programmatic'): string {
-  return launcherKind === 'interactive' ? 'Claude' : 'Claude (via GHCP)';
+function harnessForLauncher(_launcherKind: 'interactive' | 'programmatic'): string {
+  return 'Claude';
 }
 
 interface ClaudeAssistantData {
@@ -275,6 +275,18 @@ function collectClaudeAssistantData(lines: ClaudeLine[], startIndex: number, las
           continue;
         }
         applyClaudeToolBlock(block, data);
+        // Extract code content from write tools so extractCodeBlocks() can count LoC.
+        // Claude Write uses `content`, Edit uses `new_str`.
+        if (block.type === 'tool_use' && block.name && CLAUDE_WRITE_TOOLS.has(block.name) && block.input) {
+          const filePath = getInputPath(block.input, 'file_path');
+          const code = typeof block.input.content === 'string' ? block.input.content
+            : typeof block.input.new_str === 'string' ? block.input.new_str
+              : null;
+          if (code && filePath) {
+            const ext = filePath.split('.').pop() || 'unknown';
+            data.assistantTexts.push(`\`\`\`${ext}\n${code}\n\`\`\``);
+          }
+        }
       }
     }
     i++;

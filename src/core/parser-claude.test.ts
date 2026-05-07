@@ -168,25 +168,25 @@ describe('parseClaudeSessions', () => {
     });
   });
 
-  it('classifies sdk-ts entrypoint as programmatic Claude (via GHCP) harness', () => {
+  it('classifies sdk-ts entrypoint as programmatic Claude harness', () => {
     withProjectsDir('s.jsonl', [
       makeUser('hi', '2025-06-15T10:00:00Z', { entrypoint: 'sdk-ts' }),
       makeAssistant('hello', '2025-06-15T10:00:01Z', { input_tokens: 10, output_tokens: 5 }),
     ], (projectsDir) => {
       const session = parseClaudeSessions(projectsDir)[0].sessions[0];
-      expect(session.harness).toBe('Claude (via GHCP)');
+      expect(session.harness).toBe('Claude');
       expect(session.launcherKind).toBe('programmatic');
       expect(session.entrypoint).toBe('sdk-ts');
     });
   });
 
-  it('defaults missing entrypoint to programmatic (Claude (via GHCP))', () => {
+  it('defaults missing entrypoint to programmatic Claude harness', () => {
     withProjectsDir('s.jsonl', [
       makeUser('hi'),  // no entrypoint field at all
       makeAssistant('hello', '2025-06-15T10:00:01Z', { input_tokens: 10, output_tokens: 5 }),
     ], (projectsDir) => {
       const session = parseClaudeSessions(projectsDir)[0].sessions[0];
-      expect(session.harness).toBe('Claude (via GHCP)');
+      expect(session.harness).toBe('Claude');
       expect(session.launcherKind).toBe('programmatic');
       expect(session.entrypoint).toBeUndefined();
     });
@@ -198,7 +198,7 @@ describe('parseClaudeSessions', () => {
       makeAssistant('hello', '2025-06-15T10:00:01Z', { input_tokens: 10, output_tokens: 5 }),
     ], (projectsDir) => {
       const session = parseClaudeSessions(projectsDir)[0].sessions[0];
-      expect(session.harness).toBe('Claude (via GHCP)');
+      expect(session.harness).toBe('Claude');
       expect(session.launcherKind).toBe('programmatic');
       expect(session.entrypoint).toBe('some-future-launcher');
     });
@@ -254,7 +254,7 @@ describe('parseClaudeSessions', () => {
     }
   });
 
-  it('emits orphan subagent (no parent session) as standalone Claude (via GHCP)', () => {
+  it('emits orphan subagent (no parent session) as standalone Claude', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-orphan-test-'));
     const projectsDir = path.join(root, 'projects');
     const projDir = path.join(projectsDir, '-Users-me-proj');
@@ -280,7 +280,7 @@ describe('parseClaudeSessions', () => {
       expect(sessions).toHaveLength(1);
       // Orphan session takes the parent dir name as its sessionId
       expect(sessions[0].sessionId).toBe('orphan-sess');
-      expect(sessions[0].harness).toBe('Claude (via GHCP)');
+      expect(sessions[0].harness).toBe('Claude');
       expect(sessions[0].launcherKind).toBe('programmatic');
       expect(sessions[0].requests).toHaveLength(1);
       expect(sessions[0].requests[0].messageText).toContain('orphan task');

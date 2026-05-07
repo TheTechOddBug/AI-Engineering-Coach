@@ -5,7 +5,7 @@
 
 /* Dashboard page renderer */
 
-import { DateFilter, DailyActivity, PRACTICE_GROUPS, AntiPatternData, WorkflowOptimizationData, SkillTriageResult, CatalogDiscoverResult, CatalogTriageResult, GroupScore, CodeProductionData, BurndownData } from '../core/types';
+import { DateFilter, DailyActivity, PRACTICE_GROUPS, AntiPatternData, WorkflowOptimizationData, SkillTriageResult, CatalogDiscoverResult, CatalogTriageResult, GroupScore, CodeProductionData } from '../core/types';
 import { rpc, rpcAllSettled, createChart, formatNum, COLORS, PALETTE, harnessColor, destroyChartById, scoreColor, scoreLabel } from './shared';
 import { html, render, CanvasEl, ScoreRing, PctBadge } from './render';
 import { setSkillCache, getSkillCache } from './skill-cache';
@@ -93,24 +93,12 @@ function renderDashboardMarkup(
   totalReqs: number,
   totalSessions: number,
   totalLoc: number,
-  burndown: BurndownData,
-  burndownStatus: BurndownData['status'] | null,
-  burndownLabel: string,
-  burndownColor: string,
   skillCache: ReturnType<typeof getSkillCache>,
 ): void {
   const harnesses = harnessBreakdown.labels || [];
   const overallScore = scores.length > 0 ? Math.round(scores.reduce((s, g) => s + g.score, 0) / scores.length) : 0;
   const overallColor = scoreColor(overallScore);
   render(html`
-    <div class="token-billing-banner">
-      <div class="token-billing-banner-icon">\u2139</div>
-      <div class="token-billing-banner-text">
-        <strong>Usage-based billing is coming.</strong>
-        GitHub Copilot is transitioning from premium request counting to usage-based billing.
-        We are updating AI Engineer Coach to reflect these changes. Stay tuned!
-      </div>
-    </div>
     <div class="dash-hero">
       <div class="dash-hero-left">
         <div class="dash-identity">
@@ -131,8 +119,6 @@ function renderDashboardMarkup(
           <div class="dash-stat"><div class="dash-stat-val">${formatNum(totalSessions)}</div><div class="dash-stat-lbl">Sessions</div></div>
           <div class="dash-stat"><div class="dash-stat-val">${formatNum(totalLoc)}</div><div class="dash-stat-lbl">AI LoC</div></div>
           <div class="dash-stat"><div class="dash-stat-val">${stats.totalWorkspaces}</div><div class="dash-stat-lbl">Workspaces</div></div>
-          ${burndownStatus && !burndown.harnessExcluded && html`<div class="dash-stat" title="GitHub Copilot premium-request budget. Counts requests from Copilot harnesses (VS Code, CLI, Xcode) only — Claude/Codex/OpenCode are excluded because they're billed through other plans, and Claude (via GHCP) work is already counted on the GHCP side."><div class="dash-stat-val" style=${'color:' + burndownColor}>${burndown.consumed}/${burndown.budget}</div><div class="dash-stat-lbl">Premium Requests <span style="color:var(--text-muted);font-size:10px;">(GHCP only)</span> <span style=${'color:' + burndownColor + ';font-size:10px;'}>${burndownLabel}</span></div></div>`}
-          ${burndownStatus && burndown.harnessExcluded && html`<div class="dash-stat" title="Premium requests are only counted for GitHub Copilot harnesses (VS Code, CLI, Xcode). The currently selected harness is billed separately and does not count toward your GHCP premium-request budget."><div class="dash-stat-val" style="color:var(--text-muted);">N/A</div><div class="dash-stat-lbl">Premium Requests <span style="color:var(--text-muted);font-size:10px;">(not counted for this harness)</span></div></div>`}
         </div>
         ${harnesses.length > 0 && html`<div class="dash-harnesses dash-harnesses-right">${harnesses.map((h, i) => html`<span class="dash-harness-tag" style=${'border-color:' + harnessColor(h, i) + ';color:' + harnessColor(h, i)}>${h}</span>`)}</div>`}
       </div>
@@ -197,15 +183,14 @@ function renderDashboardSkillFinder(skillCache: ReturnType<typeof getSkillCache>
 
 export async function renderDashboard(container: HTMLElement, currentFilter: DateFilter): Promise<void> {
   const emptyDaily: DailyActivity = { labels: [], values: [], sessions: [], loc: [], workspaces: [], byHarness: [] };
-  const emptyCodeProd: CodeProductionData = { summary: { totalAiLoc: 0, totalUserLoc: 0, totalLoc: 0, aiBlocks: 0, userBlocks: 0, aiRatio: 0, locCost2010: 0, costPerLoc: 0 }, byLanguage: { labels: [], aiLoc: [], userLoc: [] }, dailyTimeline: { labels: [], aiLoc: [], userLoc: [] }, byWorkspace: { labels: [], aiLoc: [], userLoc: [] }, dailyByWorkspace: {} };
-  const [stats, daily, wsBreakdown, harnessBreakdown, antiPatterns, codeProd, burndown] = await rpcAllSettled([
+  const emptyCodeProd: CodeProductionData = { summary: { totalAiLoc: 0, totalUserLoc: 0, totalLoc: 0, aiBlocks: 0, userBlocks: 0, aiRatio: 0, locCost2010: 0, costPerLoc: 0 }, byLanguage: { labels: [], aiLoc: [], userLoc: [] }, dailyTimeline: { labels: [], aiLoc: [], userLoc: [] }, byWorkspace: { labels: [], aiLoc: [], userLoc: [] }, dailyByWorkspace: {}, dailyByModel: {}, dailyByHarness: {} };
+  const [stats, daily, wsBreakdown, harnessBreakdown, antiPatterns, codeProd] = await rpcAllSettled([
     rpc<{ totalSessions: number; totalWorkspaces: number; totalRequests: number }>('getStats', currentFilter as Record<string, unknown>),
     rpc<DailyActivity>('getDailyActivity', currentFilter as Record<string, unknown>),
     rpc<{ labels: string[]; values: number[] }>('getWorkspaceBreakdown', currentFilter as Record<string, unknown>),
     rpc<{ labels: string[]; requests: number[] }>('getHarnessBreakdown', currentFilter as Record<string, unknown>),
     rpc<AntiPatternData>('getAntiPatterns', currentFilter as Record<string, unknown>),
     rpc<CodeProductionData>('getCodeProduction', currentFilter as Record<string, unknown>),
-    rpc<BurndownData>('getBurndown', { config: { sku: 'pro' }, filter: currentFilter as Record<string, unknown> }),
   ] as const, [
     { totalSessions: 0, totalWorkspaces: 0, totalRequests: 0 },
     emptyDaily,
@@ -213,7 +198,6 @@ export async function renderDashboard(container: HTMLElement, currentFilter: Dat
     { labels: [], requests: [] },
     { patterns: [], totalOccurrences: 0, groupScores: [], weeklyScores: { labels: [], series: [] } } as unknown as AntiPatternData,
     emptyCodeProd,
-    { currentMonth: '', daysInMonth: 30, dayOfMonth: 1, budget: 0, consumed: 0, projected: 0, dailyConsumption: { labels: [], values: [], cumulative: [] }, projectedLine: [], budgetLine: [], status: 'on-track' as const, recommendation: '' },
   ] as const);
 
   const totalLoc = daily.loc.reduce((a, b) => a + b, 0);
@@ -236,9 +220,6 @@ export async function renderDashboard(container: HTMLElement, currentFilter: Dat
     .sort((a, b) => b.loc - a.loc)
     .slice(0, 8);
 
-  const burndownStatus = burndown.budget > 0 ? burndown.status : null;
-  const burndownLabel = burndownStatus === 'over-budget' ? 'Over' : burndownStatus === 'warning' ? 'Watch' : burndownStatus === 'on-track' ? 'OK' : '';
-  const burndownColor = burndownStatus === 'over-budget' ? COLORS.red : burndownStatus === 'warning' ? COLORS.yellow : COLORS.green;
   const skillCache = getSkillCache(currentFilter);
 
   renderDashboardMarkup(
@@ -251,10 +232,6 @@ export async function renderDashboard(container: HTMLElement, currentFilter: Dat
     totalReqs,
     totalSessions,
     totalLoc,
-    burndown,
-    burndownStatus,
-    burndownLabel,
-    burndownColor,
     skillCache,
   );
 

@@ -23,7 +23,7 @@ vi.mock('./parser-xcode', () => ({
 vi.mock('./parser-harnesses', () => ({
   collectExternalHarnessesSync: vi.fn(),
   collectExternalHarnessesAsync: vi.fn(() => Promise.resolve()),
-  EXTERNAL_HARNESS_SET: new Set(['Claude', 'Claude (via GHCP)', 'Codex', 'OpenCode']),
+  EXTERNAL_HARNESS_SET: new Set(['Claude', 'Codex', 'OpenCode']),
 }));
 
 vi.mock('./cache', () => ({
@@ -273,7 +273,7 @@ describe('parseAllLogsAsyncDetailed', () => {
     cachedResult.sessions.push(
       makeSession({ sessionId: 'kept', harness: 'VS Code' }),
       makeSession({ sessionId: 'claude', harness: 'Claude' }),
-      makeSession({ sessionId: 'claude-ghcp', harness: 'Claude (via GHCP)' }),
+      makeSession({ sessionId: 'claude-ghcp', harness: 'Claude' }),
       makeSession({ sessionId: 'codex', harness: 'Codex' }),
     );
 

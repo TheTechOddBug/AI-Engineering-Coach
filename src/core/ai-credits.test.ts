@@ -32,11 +32,8 @@ function sess(requests: SessionRequest[]): Session {
     sessionId: `s-${Math.random().toString(36).slice(2, 8)}`,
     workspaceId: 'ws-1',
     workspaceName: 'proj',
-    // 'Claude (via GHCP)' is in AI_CREDIT_HARNESSES (so getAiCredits picks
-    // these up) but NOT in GHCP_BILLABLE_HARNESSES (so claude-* model IDs
-    // don't get tagged as `delegated`). This lets these tests exercise the
-    // credit-math paths cleanly regardless of the request's model.
-    harness: 'Claude (via GHCP)',
+    // All Claude sessions now use the unified 'Claude' harness.
+    harness: 'Claude',
     requests,
   });
 }
@@ -214,7 +211,7 @@ describe('getAiCreditBurndown — missing-token handling', () => {
       sessionId: 's-pending',
       workspaceId: 'ws-1',
       workspaceName: 'proj',
-      harness: 'Claude (via GHCP)',
+      harness: 'Claude',
       requests: [
         createRequest({
           messageText: 'hi', responseText: 'in progress',
@@ -276,7 +273,7 @@ describe('getAiCredits — new bucket semantics', () => {
       sessionId: 's-mix',
       workspaceId: 'ws-1',
       workspaceName: 'proj',
-      harness: 'Claude (via GHCP)',
+      harness: 'Claude',
       requests: [
         createRequest({ messageText: 'a', responseText: 'b', requestId: 'r1',
           timestamp: BASE_TS, modelId: 'claude-sonnet-4',
@@ -308,7 +305,7 @@ describe('getAiCredits — new bucket semantics', () => {
       sessionId: 's-allpending',
       workspaceId: 'ws-1',
       workspaceName: 'proj',
-      harness: 'Claude (via GHCP)',
+      harness: 'Claude',
       requests: [
         createRequest({ messageText: 'a', responseText: 'b', requestId: 'p1',
           timestamp: BASE_TS, modelId: 'claude-sonnet-4', endState: 'pending' }),
@@ -528,7 +525,7 @@ describe('getAiCredits — dailyTokensByWorkspace', () => {
       sessionId: `s-${Math.random().toString(36).slice(2, 8)}`,
       workspaceId: wsName,
       workspaceName: wsName,
-      harness: 'Claude (via GHCP)',
+      harness: 'Claude',
       requests,
     });
   }

@@ -63,10 +63,20 @@ export function validateDateFilter(p: Record<string, unknown>): DateFilter | und
 function validateBurndownConfig(raw: unknown): BurndownConfig {
   if (!isRecord(raw)) return { sku: 'pro' };
   const obj = raw;
+  // Validate modelBudgets: must be Record<string, number> with positive values
+  let modelBudgets: Record<string, number> | undefined;
+  if (isRecord(obj.modelBudgets)) {
+    modelBudgets = {};
+    for (const [k, v] of Object.entries(obj.modelBudgets)) {
+      if (isString(k) && isNumber(v) && v > 0) modelBudgets[k] = v;
+    }
+    if (Object.keys(modelBudgets).length === 0) modelBudgets = undefined;
+  }
   return {
     sku: isString(obj.sku) ? obj.sku : 'pro',
     ...(isNumber(obj.customBudget) && { customBudget: obj.customBudget }),
     ...(isString(obj.month) && { month: obj.month }),
+    ...(modelBudgets && { modelBudgets }),
   };
 }
 
