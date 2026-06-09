@@ -12,6 +12,7 @@ import { Workspace } from './types';
 import { ParseContext, prefetchCache } from './parser-shared';
 import { getMemoryCache, setMemoryCache, computeDirMetasAsync, loadCacheData, saveCacheData, findStaleDirs, clearCache, stripSessionsForMemory } from './cache';
 import type { DirMetas, ParseResult, SessionSource } from './cache';
+import { ChunkAssembler, type WorkerChunkPayload, type WorkerDonePayload } from './parse-chunking';
 import { findVsCodeDirs, scanVsCodeDirs, processWorkspaceEntry, processWorkspaceEntryAsync, harnessFromPath } from './parser-vscode';
 import { findXcodeDirs, parseXcodeDatabases, parseXcodeDatabasesAsync } from './parser-xcode';
 import { collectExternalHarnessesAsync, collectExternalHarnessesSync, EXTERNAL_HARNESS_SET } from './parser-harnesses';
@@ -166,20 +167,8 @@ async function prefetchBatch(
 
 const BATCH_SIZE = 32;
 
-type SessionSourceVal = ParseResult['sessionSourceIndex'] extends Map<string, infer V> ? V : never;
-
-interface WorkerChunkPayload {
-  sessions: ParseResult['sessions'];
-  editLocEntries: [string, [string, number][]][];
-  sourceEntries: [string, SessionSourceVal][];
-}
-
-interface WorkerDonePayload {
-  workspaces: [string, Workspace][];
-  orphanEditLoc: [string, [string, number][]][];
-  orphanSources: [string, SessionSourceVal][];
-  dirMetas: DirMetas;
-}
+/** The worker's `done` message is the chunking done payload plus worker-only dir fingerprints. */
+type WorkerDoneMessagePayload = WorkerDonePayload & { dirMetas: DirMetas };
 
 function toDateStr(ms: number): string {
   const d = new Date(ms);
@@ -671,11 +660,8 @@ export async function parseAllLogsViaWorker(
       let lastWorkspaceLogged = 0;
       let settled = false;
 
-      // Chunked-IPC accumulators (issue #106, S1). Declared per-attempt so a retry starts fresh.
-      const accSessions: ParseResult['sessions'] = [];
-      const accEditLoc = new Map<string, Map<string, number>>();
-      const accSources = new Map<string, SessionSourceVal>();
-      let chunkCount = 0;
+      // Chunked-IPC assembler (issue #106, S1). Declared per-attempt so a retry starts fresh.
+      const assembler = new ChunkAssembler();
 
       const finish = (fn: () => void): void => {
         if (settled) return;
@@ -694,7 +680,7 @@ export async function parseAllLogsViaWorker(
         fail('parse worker timeout (10m)');
       }, TIMEOUT_MS);
 
-      child.on('message', (msg: { type: 'progress'; progress: LoadProgress } | { type: 'chunk'; payload: WorkerChunkPayload } | { type: 'done'; payload: WorkerDonePayload } | { type: 'error'; message?: string }) => {
+      child.on('message', (msg: { type: 'progress'; progress: LoadProgress } | { type: 'chunk'; payload: WorkerChunkPayload } | { type: 'done'; payload: WorkerDoneMessagePayload } | { type: 'error'; message?: string }) => {
         if (msg.type === 'progress') {
           if (msg.progress.phase !== lastPhase) {
             lastPhase = msg.progress.phase;
@@ -714,23 +700,19 @@ export async function parseAllLogsViaWorker(
         }
 
         if (msg.type === 'chunk') {
-          chunkCount++;
-          for (const s of msg.payload.sessions) accSessions.push(s);
-          for (const [k, v] of msg.payload.editLocEntries) accEditLoc.set(k, new Map(v));
-          for (const [k, v] of msg.payload.sourceEntries) accSources.set(k, v);
+          assembler.addChunk(msg.payload);
           return;
         }
 
         if (msg.type === 'done') {
-          for (const [k, v] of msg.payload.orphanEditLoc) accEditLoc.set(k, new Map(v));
-          for (const [k, v] of msg.payload.orphanSources) accSources.set(k, v);
-          runtimeDebug('parser', 'child-done', `attempt=${attempt} chunks=${chunkCount} workspaces=${msg.payload.workspaces.length} sessions=${accSessions.length}`);
+          const assembled = assembler.finish(msg.payload);
+          runtimeDebug('parser', 'child-done', `attempt=${attempt} chunks=${assembler.chunkCount} workspaces=${msg.payload.workspaces.length} sessions=${assembled.sessions.length}`);
           finish(() => {
             const result: ParseResult = {
-              workspaces: new Map(msg.payload.workspaces),
-              sessions: accSessions,
-              editLocIndex: accEditLoc,
-              sessionSourceIndex: accSources,
+              workspaces: assembled.workspaces,
+              sessions: assembled.sessions,
+              editLocIndex: assembled.editLocIndex,
+              sessionSourceIndex: assembled.sessionSourceIndex,
             };
             setMemoryCache(result, msg.payload.dirMetas);
             // Child already sent the stripped representation, but keep this idempotent.

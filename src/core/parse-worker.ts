@@ -10,6 +10,7 @@
 
 import { parentPort } from 'worker_threads';
 import { stripSessionsForMemory } from './cache';
+import { emitResultChunks, DEFAULT_SESSION_CHUNK_SIZE } from './parse-chunking';
 import { parseAllLogsAsyncDetailed, type LoadProgress } from './parser';
 import { installRuntimeDebugHooks, runtimeDebug } from './runtime-debug';
 
@@ -18,7 +19,7 @@ interface ParseWorkerRequest {
 }
 
 /** Number of sessions per streamed IPC chunk (issue #106, S1). */
-const SESSION_CHUNK_SIZE = 250;
+const SESSION_CHUNK_SIZE = DEFAULT_SESSION_CHUNK_SIZE;
 
 interface ProgressMessage {
   type: 'progress';
@@ -108,49 +109,21 @@ onMessage(async (msg) => {
 
     runtimeDebug('parse-worker', 'message-result', `workspaces=${result.workspaces.size} sessions=${result.sessions.length}`);
 
-    // Stream the result to the parent in per-session-batch chunks (issue #106, S1). Sending
-    // one giant payload allocates a single large JSON string; streaming keeps each serialized
-    // chunk small so it can be GC'd before the next is built. editLocIndex / sessionSourceIndex
-    // entries travel with the chunk that owns their sessions; anything left over (edits with no
-    // matching chat request, or sources for filtered sessions) is flushed in the `done` message
-    // so nothing is dropped.
-    const emittedEditLocKeys = new Set<string>();
-    const emittedSessionIds = new Set<string>();
-    for (let i = 0; i < result.sessions.length; i += SESSION_CHUNK_SIZE) {
-      const slice = result.sessions.slice(i, i + SESSION_CHUNK_SIZE);
-      const editLocEntries: [string, [string, number][]][] = [];
-      const sourceEntries: [string, unknown][] = [];
-      for (const s of slice) {
-        emittedSessionIds.add(s.sessionId);
-        const src = result.sessionSourceIndex.get(s.sessionId);
-        if (src) sourceEntries.push([s.sessionId, src]);
-        for (const r of s.requests) {
-          if (emittedEditLocKeys.has(r.requestId)) continue;
-          const fileMap = result.editLocIndex.get(r.requestId);
-          if (fileMap) {
-            emittedEditLocKeys.add(r.requestId);
-            editLocEntries.push([r.requestId, Array.from(fileMap.entries())]);
-          }
-        }
-      }
-      send({ type: 'chunk', payload: { sessions: slice, editLocEntries, sourceEntries } });
-    }
-
-    const orphanEditLoc: [string, [string, number][]][] = [];
-    for (const [reqId, fileMap] of result.editLocIndex) {
-      if (!emittedEditLocKeys.has(reqId)) orphanEditLoc.push([reqId, Array.from(fileMap.entries())]);
-    }
-    const orphanSources: [string, unknown][] = [];
-    for (const [sessionId, src] of result.sessionSourceIndex) {
-      if (!emittedSessionIds.has(sessionId)) orphanSources.push([sessionId, src]);
-    }
+    // Stream the result to the parent in per-session-batch chunks (issue #106, S1). See
+    // parse-chunking.ts for the emit/assemble contract; orphan edit/source entries are
+    // returned in `done` so nothing is dropped.
+    const done = emitResultChunks(
+      result,
+      (chunk) => send({ type: 'chunk', payload: chunk }),
+      SESSION_CHUNK_SIZE,
+    );
 
     send({
       type: 'done',
       payload: {
-        workspaces: Array.from(result.workspaces.entries()),
-        orphanEditLoc,
-        orphanSources,
+        workspaces: done.workspaces,
+        orphanEditLoc: done.orphanEditLoc,
+        orphanSources: done.orphanSources,
         dirMetas,
       },
     });
